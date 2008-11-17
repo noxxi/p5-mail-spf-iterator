@@ -1,2 +1,7 @@
+0.02 2008-11-17
+- specify URI as prereq
+- if YAML is not installed show why test suite got skipped
+- skip parts of test suite of Socket6 not installed
+
 0.01 2008-11-13
 - first release which passes SPF test suite

@@ -3,10 +3,11 @@ use strict;
 use warnings;
 
 my @tests;
+my $can_ip6;
 BEGIN {
 	eval 'use YAML "LoadFile"';
 	if ( $@ ) {
-		print "1..0 # YAML not installed: $@\n";
+		print "1..1\nok # skip YAML.pm not installed\n";
 		exit;
 	}
 	my $tfile = 'rfc4408-tests.yml';
@@ -16,12 +17,14 @@ BEGIN {
 		last;
 	}
 	if ( ! @tests ) {
-		print "1..0 # YAML file for test suite not found\n";
+		print "1..1\nok # skip YAML file for test suite not found\n";
 		exit;
 	}
 	my $sum = 0;
 	$sum += keys(%{ $_->{tests} }) for (@tests);
 	print "1..$sum\n";
+
+	$can_ip6 = eval 'use Socket6';
 }
 
 use Mail::SPF::Iterator;
@@ -47,6 +50,11 @@ for my $test ( @tests ) {
 		my $spec = $tdata->{spec};
 		$spec = [ $spec ] if ! ref($spec);
 		my $comment =  "$desc | $tname (@$spec) (@$result)";
+
+		if ( ! $can_ip6 and ( $tdata->{host} =~m{::} or $tname =~m{ip6} )) {
+			print "ok # skip Socket6.pm not installed\n";
+			next;
+		}
 
 		my $status = '';
 		# capture debug output of failed cases

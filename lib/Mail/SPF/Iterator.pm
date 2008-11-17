@@ -120,7 +120,7 @@ use strict;
 use warnings;
 
 package Mail::SPF::Iterator;
-our $VERSION = 0.01;
+our $VERSION = 0.02;
 
 use fields qw( clientip4 clientip6 domain sender helo myname
 	include_stack cb cbq cbid validated limit_dns_mech 
@@ -134,7 +134,7 @@ use base 'Exporter';
 
 ### Socket6 is not yet perl core, so check, if we can use it. Otherwise we
 ### hopefully don't get any IP6 data, so no need to use it.
-my $can_ip6;
+my $can_ip6 = 0;
 BEGIN {
 
 	$can_ip6 =  eval { 
