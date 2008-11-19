@@ -1,3 +1,9 @@
+0.03 2008-11-19
+- fixes for Socket6 detection
+- fixes for test suite
+- fixes for cases, where DNS name contains special chars (qname from
+  Net::DNS::Question returns presentation format, not wire format, if
+  it got the data from the wire)
 0.02 2008-11-17
 - specify URI as prereq
 - if YAML is not installed show why test suite got skipped

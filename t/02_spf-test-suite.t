@@ -5,8 +5,7 @@ use warnings;
 my @tests;
 my $can_ip6;
 BEGIN {
-	eval 'use YAML "LoadFile"';
-	if ( $@ ) {
+	if ( ! eval 'use YAML "LoadFile";1' ) {
 		print "1..1\nok # skip YAML.pm not installed\n";
 		exit;
 	}
@@ -24,7 +23,7 @@ BEGIN {
 	$sum += keys(%{ $_->{tests} }) for (@tests);
 	print "1..$sum\n";
 
-	$can_ip6 = eval 'use Socket6';
+	$can_ip6 = eval 'use Socket6;1';
 }
 
 use Mail::SPF::Iterator;
@@ -189,7 +188,7 @@ sub send {
 			my %rr = ( type => $qtype, name => $qname );
 			if ( $qtype eq 'MX' ) {
 				$rr{exchange} = $ans->[1];
-				$rr{priority} = $ans->[0];
+				$rr{preference} = $ans->[0];
 				# add A/AAAA records for MX name as additional data
 				if ( my $add = $self->{records}{$ans->[1]} ) {
 					for (@$add) {

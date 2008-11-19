@@ -8,8 +8,8 @@ Mail::SPF::Iterator - iterative SPF lookup
 	use Mail::SPF::Iterator;
 	my $spf = Mail::SPF::Iterator->new(
 		$ip,       # IP4|IP6 of client
-		$mailfrom, # from MAIL FROM: 
-  		$helo,     # from HELO|EHLO
+		$mailfrom, # from MAIL FROM:
+		$helo,     # from HELO|EHLO
 		$myname,   # optional: my hostname
 	);
 
@@ -33,14 +33,14 @@ Mail::SPF::Iterator - iterative SPF lookup
 	}
 
 	# $result = Fail|Pass|...
-	# $ans[0] = comment for Received-SPF	
+	# $ans[0] = comment for Received-SPF
 	# $ans[1] = problem for Received-SPF on Fail
 
 =head1 DESCRIPTION
 
 This module provides an iterative resolving of SPF records. Contrary to
 Mail::SPF, which does blocking DNS lookups, this module just returns the DNS
-queries and later expects the responses. 
+queries and later expects the responses.
 
 Lookup of the DNS records will be done outside of the module and can be done
 in a event driven way.
@@ -55,7 +55,7 @@ Construct a new Mail::SPF::Iterator object, which maintains the state
 between the steps of the iteration. For each new SPF check a new object has
 to be created.
 
-IP is the IP if the client as string (IP4 or IP6). 
+IP is the IP if the client as string (IP4 or IP6).
 
 MAILFROM is the user@domain part from the MAIL FROM handshake, e.g. '<','>'
 and any parameters removed. If only '<>' was given (like in bounces) the
@@ -72,7 +72,7 @@ Returns the new object.
 =item next([ CBID, ANSWER ])
 
 C<next> will be initially called with no arguments to get initial DNS queries
-and then will be called with the DNS answers. 
+and then will be called with the DNS answers.
 
 ANSWER is either a DNS packet with the response to a former query or C<< [
 QUERY, REASON ] >> on failures, where QUERY is the DNS packet containing the
@@ -81,7 +81,7 @@ failed query and REASON the reason, why the query failed (like TIMEOUT).
 CBID is the id for the query returned from the last call to C<next>. It is
 given to control, if the answer is for the current query.
 
-If a final result was achieved it will return 
+If a final result was achieved it will return
 C<< ( RESULT, COMMENT, PROBLEM ) >>. RESULT is the result, e.g. "Fail",
 "Pass",.... COMMENT is the comment for the Received-SPF header. PROBLEM is
 the problem for this header in the case of a failure (Fail, *Error)
@@ -120,10 +120,10 @@ use strict;
 use warnings;
 
 package Mail::SPF::Iterator;
-our $VERSION = 0.02;
+our $VERSION = 0.03;
 
 use fields qw( clientip4 clientip6 domain sender helo myname
-	include_stack cb cbq cbid validated limit_dns_mech 
+	include_stack cb cbq cbid validated limit_dns_mech
 	mech redirect explain );
 
 use Net::DNS;
@@ -134,10 +134,11 @@ use base 'Exporter';
 
 ### Socket6 is not yet perl core, so check, if we can use it. Otherwise we
 ### hopefully don't get any IP6 data, so no need to use it.
-my $can_ip6 = 0;
+my $can_ip6;
 BEGIN {
 
-	$can_ip6 =  eval { 
+	$can_ip6 = 0;
+	$can_ip6 = eval {
 		require Socket6;
 		Socket6->import(qw( inet_pton inet_ntop));
 		# newer Socket versions already export AF_INET6
@@ -146,13 +147,14 @@ BEGIN {
 	};
 	if ( ! $can_ip6 ) {
 		no strict 'refs';
-		*{'AF_INET6'} = *{'inet_pton'} = *{'inet_ntop'} 
+		*{'AF_INET6'} = *{'inet_pton'} = *{'inet_ntop'}
 			= sub { die "no IPv6 support" };
 	}
 }
 
 ### create SPF_* constants and export them
 our @EXPORT;
+use constant SPF_Noop => '_NOOP';
 BEGIN {
 	my $i=0;
 	for (qw(TempError PermError Pass Fail SoftFail Neutral None )) {
@@ -213,7 +215,7 @@ sub new {
 	my ($class,$ip,$mailfrom,$helo,$myname) = @_;
 	my $self = fields::new($class);
 
-	my $domain = 
+	my $domain =
 		$mailfrom =~m{\@([\w\-.]+)$} ? $1 :
 		$mailfrom =~m{\@\[([\da-f:\.]+)\]$}i ? $1 :
 		$helo =~m{\@([\w\-.]+)$} ? $1 :
@@ -297,7 +299,15 @@ sub next {
 
 			my $found;
 			for (@$cb_queries) {
-				if ( $qtype eq $_->{q}->qtype and lc($q->qname) eq lc($_->{q}->qname)) {
+				# presentation2wire
+				# for whatever reason \032 is not octal but chr(32), see Net::DNS::wire2presentation
+				# $_->{q}->qname has still the raw (wire) value, because it was set to it
+				# but the qname of the response has the non-wire presentation :(
+				# fortunatly this applies only to DNS names with special chars
+				( my $qname = lc($q->qname) )
+					=~s{\\(?:(\d\d\d)|(.))}{ $2 || chr($1) }esg;
+
+				if ( $qtype eq $_->{q}->qtype and $qname eq lc($_->{q}->qname)) {
 					$found = $_;
 					last;
 				}
@@ -314,7 +324,7 @@ sub next {
 
 			} elsif ( ++$found->{done} > 1 ) {
 				# duplicate response - ignore
-				return; 
+				return;
 			}
 
 			if ( $err ) {
@@ -348,7 +358,7 @@ sub next {
 		DEBUG( "loop rv=".Data::Dumper->new([\@rv])->Maxdepth(1)->Dump );
 
 		##### ignored, try to find next action
-		if ( ! @rv ) {        
+		if ( ! @rv ) {
 			DEBUG( "ignored" );
 			my $next = shift @{$self->{mech}};
 			if ( ! $next ) {
@@ -361,7 +371,7 @@ sub next {
 							@rv = $self->_resolve_macro_p($domain);
 							return @rv if @rv;
 						}
-						$self->{redirect} = $domain = $domain->{expanded}; 
+						$self->{redirect} = $domain = $domain->{expanded};
 					}
 					if ( my @err = _check_domain($domain,"redirect:$domain" )) {
 						return @err
@@ -390,7 +400,7 @@ sub next {
 					}
 					redo;
 				}
-				
+
 				# no more data
 				return ( SPF_Neutral );
 			}
@@ -401,13 +411,13 @@ sub next {
 		}
 
 		##### list of DNS packets ? -> return as (undef,cbid,@pkts)
-		if ( UNIVERSAL::isa( $rv[0],'Net::DNS::Packet' )) { 
+		if ( UNIVERSAL::isa( $rv[0],'Net::DNS::Packet' )) {
 			$self->{cbq} = [ map { my ($q) = $_->question; { q => $q } } @rv ];
 			return ( undef, ++$self->{cbid}, @rv );
 		}
 
 		##### waiting for additional data to current request
-		if ( $rv[0] == -1 and grep { ! $_->{done} } @{ $self->{cbq}} ) {
+		if ( $rv[0] eq SPF_Noop and grep { ! $_->{done} } @{ $self->{cbq}} ) {
 			return;
 		}
 
@@ -440,7 +450,7 @@ sub next {
 	# special case when we ignore the current response and just wait
 	# for more. Only used when we could get multiple responses, e.g when
 	# multiple DNS requests were send ( query for SPF+TXT )
-	if ( @rv == 1 and $rv[0] == -1 ) {
+	if ( @rv == 1 and $rv[0] eq SPF_Noop ) {
 		return;
 	}
 
@@ -465,7 +475,7 @@ sub next {
 
 
 ############################################################################
-# check if the domain has the right format 
+# check if the domain has the right format
 # this checks the domain before the macros got expanded
 ############################################################################
 sub _check_macro_domain {
@@ -479,8 +489,8 @@ sub _check_macro_domain {
 		)*
 		(?:(?:
 			\. [\da-z]*[a-z][\da-z]* |
-			\. [\da-z]+-[\-a-z\d]*[\da-z] 
-		) | (?: 
+			\. [\da-z]+-[\-a-z\d]*[\da-z]
+		) | (?:
 			% (?: { [slodipvh] \d* r? [.\-+,/_=]* } | [%\-_] )
 		))
 	}xi;
@@ -488,19 +498,19 @@ sub _check_macro_domain {
 }
 
 ############################################################################
-# check if the domain has the right format 
+# check if the domain has the right format
 # this checks the domain after the macros got expanded
 ############################################################################
 sub _check_domain {
 	my ($domain,$why,$spf_level,$rx) = @_;
 	$why = '' if ! defined $why;
-	
+
 	# domain name according to RFC2181 can by anything binary!
 	# this is not only for host names
 	$rx ||= qr{.*?};
 
 	my @rv;
-	if ( $domain =~m{[^\d.]} 
+	if ( $domain =~m{[^\d.]}
 		&& $domain =~s{^($rx)\.?$}{$1} ) {
 		# looks like valid domain name
 		if ( grep { length == 0 || length>63 } split( m{\.}, $domain )) {
@@ -519,7 +529,7 @@ sub _check_domain {
 
 	# have error
 	return @rv if ! defined $spf_level;
-	return ( SPF_None, "query $why", "not a domain name" ) 
+	return ( SPF_None, "query $why", "not a domain name" )
 		if $spf_level == 1; # initial SPF query -> don't report as error
 	return ( SPF_PermError, "query $why", "not a domain name" );
 }
@@ -537,7 +547,7 @@ sub _query_txt_spf {
 
 	$self->{cb} = [ \&_got_txt_spf ];
 	DEBUG( "want SPF/TXT for $self->{domain}" );
-	return ( 
+	return (
 		scalar(Net::DNS::Packet->new( $self->{domain}, 'SPF','IN' )),
 		scalar(Net::DNS::Packet->new( $self->{domain}, 'TXT','IN' )),
 	);
@@ -576,9 +586,9 @@ sub _got_txt_spf {
 		}
 		@spfdata or last; # no usable SPF reply
 		if (@spfdata>1) {
-			return ( SPF_PermError, 
+			return ( SPF_PermError,
 				"checking $qtype for $self->{domain}",
-				"multiple SPF records" 
+				"multiple SPF records"
 			);
 		}
 		unless ( eval { $self->_parse_spf( $spfdata[0] ) }) {
@@ -587,9 +597,9 @@ sub _got_txt_spf {
 			# it does not matter if the TXT is bad and the SPF is right
 			# because according to RFC if both provide SPF (v=spf1..)
 			# they should be the same
-			return ( SPF_PermError, 
+			return ( SPF_PermError,
 				"checking $qtype for $self->{domain}",
-				"invalid SPF record: $@" 
+				"invalid SPF record: $@"
 			);
 		}
 
@@ -600,15 +610,15 @@ sub _got_txt_spf {
 	# FAILED:
 	# If this is the first response, wait for the other
 	if ( grep { ! $_->{done} } @{ $self->{cbq}} ) {
-		return (-1);
-	} 
+		return (SPF_Noop);
+	}
 
 	# otherwise it means that we got no SPF records
 	# return SPF_None if this was the initial query ($self->{mech} is undef)
-	# and SPF_PermError if as a result from redirect or include 
+	# and SPF_PermError if as a result from redirect or include
 	# ($self->{mech} is [])
-	return ( $self->{mech} ? SPF_PermError : SPF_None, 
-		'no SPF records provided' ); 
+	return ( $self->{mech} ? SPF_PermError : SPF_None,
+		'no SPF records provided' );
 }
 
 
@@ -626,14 +636,14 @@ sub _parse_spf {
 			|(redirect|exp)   # Modifier
 			|[a-zA-Z][\w.\-]*=  # unknown modifier + '='
 		)(.*)  # Arguments
-		$}x 
+		$}x
 			or die "bad SPF part: $_";
 
 		if ( $mech ) {
 			$qual = $qual2rv{ $qual || '+' };
 
 			if ( $mech eq 'all' ) {
-				die "no arguments allowed with mechanism 'all': '$_'" 
+				die "no arguments allowed with mechanism 'all': '$_'"
 					if $arg ne '';
 				push @mech, [ \&_mech_all, $qual ]
 
@@ -646,20 +656,20 @@ sub _parse_spf {
 					or die "bad ip '$ip' in '$_'";
 				next if ! $self->{clientip4}; # don't use for IP6
 				push @mech, [ \&_mech_ip4, $qual, $ip,$plen ];
-			
+
 			} elsif ( $mech eq 'ip6' ) {
 				my ($ip,$plen) = $arg =~m{^:([\da-fA-F:\.]+)(?:/([1-9]\d*|0))?$}
 					or die "bad argument for mechanism 'ip6' in '$_'";
 				$plen = 128 if ! defined $plen;
 				$plen>128 and die "invalid prefix len >128 in '$_'";
-				eval { $ip = inet_pton( AF_INET6,$ip ) } 
+				eval { $ip = inet_pton( AF_INET6,$ip ) }
 					or die "bad ip '$ip' in '$_'"
 					if $can_ip6;
 				next if ! $self->{clientip6}; # don't use for IP4
 				push @mech, [ \&_mech_ip6, $qual, $ip,$plen ];
 
 			} elsif ( $mech eq 'a' or $mech eq 'mx' ) {
-				my ($domain,$plen4,$plen6) = 
+				my ($domain,$plen4,$plen6) =
 					( $arg || '' )=~m{^(?::(.+?))?(?:/(?:([1-9]\d*|0)|/([1-9]\d*|0)))?$}
 					or die "bad argument for mechanism '$mech' in '$_'";
 				if ( defined $plen4 ) {
@@ -732,7 +742,7 @@ sub _parse_spf {
 					die $err[2] || 'Invalid domain name';
 				}
 				$explain = $self->_macro_expand($domain);
-				
+
 			} elsif ( $mod ) {
 				die "unhandled modifier '$mod'"
 			}
@@ -783,7 +793,7 @@ sub _mech_ip6 {
 
 ############################################################################
 # handle mechanism 'a'
-# check if one of the A/AAAA records for $domain resolves to 
+# check if one of the A/AAAA records for $domain resolves to
 # clientip/plen, either directly or via CNAME resolving, in which case
 # we expect the resolved CNAME to be in the hints of the response
 ############################################################################
@@ -827,7 +837,7 @@ sub _got_A {
 		} elsif ( $rrtype eq $typ ) {
 			push @answer, $rr->address;
 		}
-	} 
+	}
 
 	# and the in the additional section
 	for my $rr ($dnsresp->additional) {
@@ -916,7 +926,7 @@ sub _got_MX {
 		if ( $rr->type eq 'MX' ) {
 			$mx{ $rr->exchange } = 1;
 		}
-	} 
+	}
 
 	# domain has no MX ?
 	return if ! %mx;
@@ -944,7 +954,7 @@ sub _got_MX {
 					"getting A for $domain",
 					"bad address in A record"
 				);
-			
+
 			if ( ($packed & $mask) eq  ($self->{clientip4} & $mask) ) {
 				# match!
 				return ($qual,"matches domain: $domain/$plen with IP4 $addr" )
@@ -1004,7 +1014,7 @@ sub _got_A_exists {
 		} elsif ( $rrtype eq 'A' ) {
 			push @answer, $rr->address;
 		}
-	} 
+	}
 
 	# and the in the additional section
 	for my $rr ($dnsresp->additional) {
@@ -1051,12 +1061,12 @@ sub _mech_ptr {
 
 	my $query;
 	if ( $self->{clientip4} ) {
-		$query = join( '.', reverse split( m/\./, 
+		$query = join( '.', reverse split( m/\./,
 			inet_ntoa($self->{clientip4}) ))
 			.'.in-addr.arpa'
 	} else {
-		$query = join( '.', split( //, 
-			reverse unpack("H*",$self->{clientip6}) )) 
+		$query = join( '.', split( //,
+			reverse unpack("H*",$self->{clientip6}) ))
 			.'.ip6.arpa';
 	}
 
@@ -1075,7 +1085,7 @@ sub _got_PTR {
 	my @names;
 	for my $rr ($dnsresp->answer) {
 		push @names, lc($rr->ptrdname) if $rr->type eq 'PTR';
-	} 
+	}
 	return if ! @names; # can not be validated - ignore mech
 
 	# strip records, which do not end in $domain
@@ -1083,7 +1093,7 @@ sub _got_PTR {
 	return if ! @names; # return if no matches inside $domain
 
 	# limit to no more then 10 names!
-	@names = splice( @names,0,10 ); 
+	@names = splice( @names,0,10 );
 
 	# validate the rest by looking up the IP and verifying it
 	# with the original IP (clientip)
@@ -1096,7 +1106,7 @@ sub _got_PTR {
 sub _got_A_ptr {
 	my ($self,$dnsresp,$qual,$typ,$names) = @_;
 
-	for my $dummy ( $dnsresp->header->rcode eq 'NOERROR' ? (1):() ) { 
+	for my $dummy ( $dnsresp->header->rcode eq 'NOERROR' ? (1):() ) {
 		my (%cname,@addr);
 		# check first in the answer
 		for my $rr ($dnsresp->answer) {
@@ -1106,7 +1116,7 @@ sub _got_A_ptr {
 			} elsif ( $rrtype eq $typ ) {
 				push @addr, $rr->address;
 			}
-		} 
+		}
 
 		# and the in the additional section
 		for my $rr ($dnsresp->additional) {
@@ -1172,7 +1182,7 @@ sub _mech_include {
 		if --$self->{limit_dns_mech} < 0;
 
 	# push and reset current domain and SPF record
-	push @{$self->{include_stack}}, { 
+	push @{$self->{include_stack}}, {
 		domain   => $self->{domain},
 		mech     => $self->{mech},
 		explain  => $self->{explain},
@@ -1210,7 +1220,7 @@ sub _got_TXT_exp {
 					$txtdata = $t
 				}
 			}
-		} 
+		}
 
 		# valid TXT record found -> expand macros
 		if ( $txtdata and ( my $t = eval { $self->_macro_expand( $txtdata,'exp' ) })) {
@@ -1241,7 +1251,7 @@ sub _macro_expand {
 			{ ($mchars) (\d*)(r?) ([.\-+,/_=]*) } | # macro: %l1r+- ->  %(l)(1)(r)(+-)
 			(.|$)                                              # bad char
 		))}xg ) {
-		my ($text,$char,$macro,$macro_n,$macro_r,$macro_delim,$bad) 
+		my ($text,$char,$macro,$macro_n,$macro_r,$macro_delim,$bad)
 			= ($1,$2,$3,$4,$5,$6,$7);
 
 		if ( defined $text ) {
@@ -1253,21 +1263,21 @@ sub _macro_expand {
 				$char eq '_' ? ' ' :
 				'%20'
 
-		} elsif ( $macro ) { 
+		} elsif ( $macro ) {
 			$macro_delim ||= '.';
 			my $imacro = lc($macro);
-			my $expand = 
+			my $expand =
 				$imacro eq 's' ? $self->{sender} :
 				$imacro eq 'l' ? $self->{sender} =~m{^([^@]+)\@} ? $1 : 'postmaster' :
 				$imacro eq 'o' ? $self->{sender} =~m{\@(.*)} ? $1 : $self->{sender} :
 				$imacro eq 'd' ? $self->{domain} :
-				$imacro eq 'i' ? $self->{clientip4} ? 
-					inet_ntoa($self->{clientip4}) : 
+				$imacro eq 'i' ? $self->{clientip4} ?
+					inet_ntoa($self->{clientip4}) :
 					do { ( my $x = inet_ntop($self->{clientip6})) =~s{:}{.}g; $x } :
 				$imacro eq 'v' ? $self->{clientip4} ? 'in-addr' : 'ip6':
 				$imacro eq 'h' ? $self->{helo} :
-				$imacro eq 'c' ? $self->{clientip4} ? 
-					inet_ntoa($self->{clientip4}) : 
+				$imacro eq 'c' ? $self->{clientip4} ?
+					inet_ntoa($self->{clientip4}) :
 					inet_ntop($self->{clientip6}) :
 				$imacro eq 'r' ? $self->{myname} || 'unknown' :
 				$imacro eq 't' ? time() :
@@ -1344,10 +1354,10 @@ sub _resolve_macro_p {
 
 	my $query;
 	if ( length($ip) == 4 ) {
-		$query = join( '.', reverse split( m/\./, 
+		$query = join( '.', reverse split( m/\./,
 			inet_ntoa($ip) )) .'.in-addr.arpa'
 	} else {
-		$query = join( '.', split( //, 
+		$query = join( '.', split( //,
 			reverse unpack("H*",$ip) )) .'.ip6.arpa';
 	}
 
@@ -1363,7 +1373,7 @@ sub _validate_got_PTR {
 	my @names;
 	for my $rr ($dnsresp->answer) {
 		push @names, lc($rr->ptrdname) if $rr->type eq 'PTR';
-	} 
+	}
 	@names or return; # no records
 
 	# prefer records, which are $domain or end in $domain
@@ -1374,7 +1384,7 @@ sub _validate_got_PTR {
 	}
 
 	# limit to no more then 10 names!
-	@names = splice( @names,0,10 ); 
+	@names = splice( @names,0,10 );
 
 	# validate the rest by looking up the IP and verifying it
 	# with the original IP (clientip)
@@ -1398,7 +1408,7 @@ sub _validate_got_A_ptr {
 			} elsif ( $rrtype eq $typ ) {
 				push @addr, $rr->address;
 			}
-		} 
+		}
 
 		# and the in the additional section
 		for my $rr ($dnsresp->additional) {
