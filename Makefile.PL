@@ -9,5 +9,3 @@ WriteMakefile(
 	},
 );
 
-eval 'require YAML' or 
-	warn "YAML is needed to run SPF test suite\n";

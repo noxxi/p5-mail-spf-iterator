@@ -5,4 +5,6 @@ Makefile.PL
 MANIFEST			This list of files
 t/01_load.t
 t/02_spf-test-suite.t
+t/make-testpl.pl
+t/rfc4408-tests.pl
 t/rfc4408-tests.yml

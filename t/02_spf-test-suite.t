@@ -2,25 +2,22 @@
 use strict;
 use warnings;
 
-my @tests;
+my $Tests;
 my $can_ip6;
 BEGIN {
-	if ( ! eval 'use YAML "LoadFile";1' ) {
-		print "1..1\nok # skip YAML.pm not installed\n";
-		exit;
-	}
-	my $tfile = 'rfc4408-tests.yml';
+	my $tfile = 'rfc4408-tests.pl';
 	for (  $tfile,"t/$tfile" ) {
 		-f or next;
-		@tests = LoadFile( $_ );
+		$Tests = do $_;
+		die $@ if $@;
 		last;
 	}
-	if ( ! @tests ) {
-		print "1..1\nok # skip YAML file for test suite not found\n";
+	if ( ! $Tests or !@$Tests ) {
+		print "1..1\nok # skip Perl file for test suite not found\n";
 		exit;
 	}
 	my $sum = 0;
-	$sum += keys(%{ $_->{tests} }) for (@tests);
+	$sum += 2*keys(%{ $_->{tests} }) for (@$Tests);
 	print "1..$sum\n";
 
 	$can_ip6 = eval 'use Socket6;1';
@@ -34,79 +31,84 @@ use Data::Dumper;
 $|=1;
 my $DEBUG=1;
 
-for my $test ( @tests ) {
-	my $desc= $test->{description};
-	my $dns_setup = $test->{zonedata};
-	my $subtests = $test->{tests};
+for my $use_additionals ('with additionals','') {
+	for my $test ( @$Tests ) {
+		my $desc= $test->{description};
+		my $dns_setup = $test->{zonedata};
+		my $subtests = $test->{tests};
 
-	my $resolver = myResolver->new( records => $dns_setup );
-	for my $tname (sort keys %$subtests) {
-		my $tdata = $subtests->{$tname};
-		my $result = $tdata->{result};
-		$result = [ $result ] if ! ref $result;
-		$_=lc for(@$result);
+		my $resolver = myResolver->new( 
+			records => $dns_setup, 
+			use_additionals => $use_additionals 
+		);
+		for my $tname (sort keys %$subtests) {
+			my $tdata = $subtests->{$tname};
+			my $result = $tdata->{result};
+			$result = [ $result ] if ! ref $result;
+			$_=lc for(@$result);
 
-		my $spec = $tdata->{spec};
-		$spec = [ $spec ] if ! ref($spec);
-		my $comment =  "$desc | $tname (@$spec) (@$result)";
+			my $spec = $tdata->{spec};
+			$spec = [ $spec ] if ! ref($spec);
+			my $comment =  "$desc | $tname (@$spec) (@$result) $use_additionals";
 
-		if ( ! $can_ip6 and ( $tdata->{host} =~m{::} or $tname =~m{ip6} )) {
-			print "ok # skip Socket6.pm not installed\n";
-			next;
-		}
+			if ( ! $can_ip6 and ( $tdata->{host} =~m{::} or $tname =~m{ip6} )) {
+				print "ok # skip Socket6.pm not installed\n";
+				next;
+			}
 
-		my $status = '';
-		# capture debug output of failed cases
-		my $debug = '';
-		eval {
-			open( my $dbg, '>',\$debug );
-			local *STDERR = $dbg;
+			my $status = '';
+			# capture debug output of failed cases
+			my $debug = '';
+			eval {
+				open( my $dbg, '>',\$debug );
+				local *STDERR = $dbg;
 
-			my %d = %$tdata;
-			my $spf = eval {
-				Mail::SPF::Iterator->new(
-					delete $d{host},
-					delete $d{mailfrom},
-					delete $d{helo},
-				);
-			};
-			die "no spf: $@\n".Dumper($tdata) if ! $spf;
-
-			($status, my @ans) = $spf->next;
-			while ( ! $status ) {
-				my ($cbid,@query) = @ans;
-				die "no queries" if ! @query;
-				for my $q (@query) {
-					#DEBUG( "next query: ".$q->string );
-					my $answer = $resolver->send( $q );
-					($status,@ans) = $spf->next( $cbid,$answer 
-						? $answer 
-						: [ $q, $resolver->errorstring ]
+				my %d = %$tdata;
+				my $spf = eval {
+					Mail::SPF::Iterator->new(
+						delete $d{host},
+						delete $d{mailfrom},
+						delete $d{helo},
 					);
-					DEBUG( "status=$status" ) if $status;
-					last if $status or @ans;
+				};
+				die "no spf: $@\n".Dumper($tdata) if ! $spf;
+
+				($status, my @ans) = $spf->next;
+				while ( ! $status ) {
+					my ($cbid,@query) = @ans;
+					die "no queries" if ! @query;
+					for my $q (@query) {
+						#DEBUG( "next query: ".$q->string );
+						my $answer = $resolver->send( $q );
+						($status,@ans) = $spf->next( $cbid,$answer 
+							? $answer 
+							: [ $q, $resolver->errorstring ]
+						);
+						DEBUG( "status=$status" ) if $status;
+						last if $status or @ans;
+					}
 				}
-			}
-			$status = lc($status);
-			if ( ! grep { $status eq $_ } @$result ) {
-				die "  .. got status=$status tdata=".Dumper($tdata)."ans=@ans\n";
+				$status = lc($status);
+				if ( ! grep { $status eq $_ } @$result ) {
+					die "  .. got status=$status tdata=".Dumper($tdata)."ans=@ans\n";
+				} elsif ( $status ne $result->[0] ) {
+					if ( $tname =~m{^(mx|ptr)-limit$} ) {
+						#### spec: "... The SPF result is effectively randomized."
+						print "------- got $status, expected @$result\n";
+					} else {
+						die "------- got $status, expected @$result\n".Dumper($tdata);
+					}
+				}
+			};
+			if ( $@ ) {
+				print "not ok # $comment - got $status\n";
+				( my $t = "$debug\n$@" ) =~s{^}{| }mg;
+				print $t;
 			} elsif ( $status ne $result->[0] ) {
-				if ( $tname =~m{^(mx|ptr)-limit$} ) {
-					#### spec: "... The SPF result is effectively randomized."
-					print "------- got $status, expected @$result\n";
-				} else {
-					die "------- got $status, expected @$result\n".Dumper($tdata);
-				}
+				print "ok # $comment - got $status\n";
+			} else {
+				print "ok # $comment\n";
 			}
-		};
-		if ( $@ ) {
-			print "not ok # $comment - got $status\n";
-			( my $t = "$debug\n$@" ) =~s{^}{| }mg;
-			print $t;
-		} elsif ( $status ne $result->[0] ) {
-			print "ok # $comment - got $status\n";
-		} else {
-			print "ok # $comment\n";
 		}
 	}
 }
@@ -140,6 +142,7 @@ sub new {
 	my ($class,%options) = @_;
 	my $self = $class->SUPER::new(%options);
 	$self->{records} = $options{records};
+	$self->{use_additionals} = $options{use_additionals};
 	return $self;
 }
 
@@ -190,7 +193,7 @@ sub send {
 				$rr{exchange} = $ans->[1];
 				$rr{preference} = $ans->[0];
 				# add A/AAAA records for MX name as additional data
-				if ( my $add = $self->{records}{$ans->[1]} ) {
+				if ( $self->{use_additionals} and (my $add = $self->{records}{$ans->[1]} )) {
 					for (@$add) {
 						next if ! ref;
 						my @k = keys %$_;

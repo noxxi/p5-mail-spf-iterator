@@ -120,7 +120,7 @@ use strict;
 use warnings;
 
 package Mail::SPF::Iterator;
-our $VERSION = 0.03;
+our $VERSION = 0.04;
 
 use fields qw( clientip4 clientip6 domain sender helo myname
 	include_stack cb cbq cbid validated limit_dns_mech
@@ -812,12 +812,21 @@ sub _mech_a {
 		if --$self->{limit_dns_mech} < 0;
 
 	my $typ = $self->{clientip4} ? 'A':'AAAA';
-	$self->{cb} = [ \&_got_A, $qual,$typ,$domain,$plen ];
+	$self->{cb} = [ \&_got_A, $qual,$typ,$plen,[ [$domain,0] ] ];
 	return scalar(Net::DNS::Packet->new( $domain, $typ,'IN' ));
 }
 
+############################################################################
+# this is used in _mech_a and in _mech_mx if the address for an MX is not
+# send inside the additional data
+# in the case of MX $names might contain more than one name to resolve, it
+# will try to resolve names to addresses and to match them until @$names 
+# is empty
+# will also resolve CNAME if address is not inside additional data
+############################################################################
 sub _got_A {
-	my ($self,$dnsresp,$qual,$typ,$domain,$plen) = @_;
+	my ($self,$dnsresp,$qual,$typ,$plen,$names) = @_;
+	my ($domain,$depth) = @{ shift(@$names) };
 
 	if ( $dnsresp->header->rcode eq 'NXDOMAIN' ) {
 		# no records found
@@ -828,50 +837,53 @@ sub _got_A {
 		);
 	}
 
-	my (%cname,@answer);
+	my (%cname,@addr);
 	# check first in the answer
 	for my $rr ($dnsresp->answer) {
 		my $rrtype = $rr->type;
 		if ( $rrtype eq 'CNAME' ) {
-			$cname{ $rr->cname } = 1;
+			$cname{ $rr->cname } = 0;
 		} elsif ( $rrtype eq $typ ) {
-			push @answer, $rr->address;
+			push @addr, $rr->address;
 		}
 	}
 
 	# and the in the additional section
 	for my $rr ($dnsresp->additional) {
 		if ( $rr->type eq $typ && $cname{$rr->name} ) {
-			push @answer, $rr->address;
+			push @addr, $rr->address;
+			$cname{$rr->name}++;
 		}
 	}
 
-	if ( ! @answer ) {
-		# no A/AAAA records in response - ignore
-		return;
-	}
+	push @$names, map { $cname{$_} ? (): ([ $_, $depth+1 ]) } keys %cname;  # unresolved CNAME
+	{ my %h; @$names = grep { ! $h{$_}++ } @$names; } # uniq
+	return _check_A_match($self,$qual,$domain,$plen,\@addr,$names);
+}
 
+sub _check_A_match {
+	my ($self,$qual,$domain,$plen,$addr,$names) = @_;
+	
 	# process all found addresses
-	if ( $typ eq 'A' ) {
+	if ( $self->{clientip4} ) {
+		$plen = 32 if ! defined $plen;
 		my $mask = $mask4[$plen];
-		for my $addr (@answer) {
+		for my $addr (@$addr) {
 			my $packed = $addr=~m{^[\d.]+$} && eval { inet_aton($addr) }
 				or return ( SPF_TempError,
 					"getting A for $domain",
 					"bad address in A record"
 				);
-			if ( ($packed & $mask) eq ($self->{clientip4} & $mask) ) {
+			
+			if ( ($packed & $mask) eq  ($self->{clientip4} & $mask) ) {
 				# match!
-				DEBUG( "check $addr against ".inet_ntoa( $self->{clientip4})."/$plen -> MATCH" );
 				return ($qual,"matches domain: $domain/$plen with IP4 $addr" )
-			} else {
-				DEBUG( "check $addr against ".inet_ntoa( $self->{clientip4})."/$plen -> NO MATCH -- answer="
-					.inet_ntoa( $packed&$mask)." ip=".inet_ntoa($self->{clientip4}&$mask)." mask=".inet_ntoa($mask) );
 			}
 		}
 	} else { # AAAA
+		$plen = 128 if ! defined $plen;
 		my $mask = $mask6[$plen];
-		for my $addr (@answer) {
+		for my $addr (@$addr) {
 			my $packed = eval { inet_pton(AF_INET6,$addr) }
 				or return ( SPF_TempError,
 					"getting AAAA for $domain",
@@ -884,9 +896,22 @@ sub _got_A {
 		}
 	}
 
-	# no match
+	# no match yet, can we resolve another name?
+	while ( @$names ) {
+		if ( $names->[0][1]>2 ) {
+			# recursion of CNAMEs to deep, skip this name
+			shift @$names;
+			next;
+		}
+		my $typ = $self->{clientip4} ? 'A':'AAAA';
+		$self->{cb} = [ \&_got_A, $qual,$typ,$plen,$names ];
+		return scalar(Net::DNS::Packet->new( $names->[0][0], $typ,'IN' ));
+	}
+
+	# finally no match
 	return;
 }
+
 
 
 ############################################################################
@@ -920,66 +945,31 @@ sub _got_MX {
 		);
 	}
 
-	my (%mx,@answer);
+	my (%mx,@addr);
 	# check first in the answer
 	for my $rr ($dnsresp->answer) {
 		if ( $rr->type eq 'MX' ) {
-			$mx{ $rr->exchange } = 1;
+			$mx{ $rr->exchange } = 0;
 		}
 	}
 
-	# domain has no MX ?
+	# domain has no MX -> no match
 	return if ! %mx;
 
-	# and the in the additional section
+	# try to find A|AAAA records in additional data
 	my $atyp = $self->{clientip4} ? 'A':'AAAA';
 	for my $rr ($dnsresp->additional) {
-		if ( $rr->type eq $atyp && $mx{$rr->name} ) {
-			push @answer, $rr->address;
+		if ( $rr->type eq $atyp && exists $mx{$rr->name} ) {
+			push @addr, $rr->address;
+			$mx{$rr->name}++;
 		}
 	}
 
-	if ( ! @answer ) {
-		# no A/AAAA records in additional section
-		return;
-	}
+	# remove from %mx where I've found addresses
+	delete @mx{ grep { $mx{$_} } keys %mx };
 
-	# process all found addresses
-	if ( $atyp eq 'A' ) {
-		$plen = 32 if ! defined $plen;
-		my $mask = $mask4[$plen];
-		for my $addr (@answer) {
-			my $packed = $addr=~m{^[\d.]+$} && eval { inet_aton($addr) }
-				or return ( SPF_TempError,
-					"getting A for $domain",
-					"bad address in A record"
-				);
-
-			if ( ($packed & $mask) eq  ($self->{clientip4} & $mask) ) {
-				# match!
-				return ($qual,"matches domain: $domain/$plen with IP4 $addr" )
-			}
-		}
-	} else { # AAAA
-		$plen = 128 if ! defined $plen;
-		my $mask = $mask6[$plen];
-		for my $addr (@answer) {
-			my $packed = eval { inet_pton(AF_INET6,$addr) }
-				or return ( SPF_TempError,
-					"getting AAAA for $domain",
-					"bad address in AAAA record"
-				);
-			if ( ($packed & $mask) eq ($self->{clientip6} & $mask) ) {
-				# match!
-				return ($qual,"matches domain: $domain//$plen with IP6 $addr" )
-			}
-		}
-	}
-
-	# no match
-	return;
+	return _check_A_match( $self,$qual,$domain,$plen,\@addr,[ map { [$_,0] } keys %mx ]);
 }
-
 
 ############################################################################
 # handle mechanis 'exists'
