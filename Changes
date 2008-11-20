@@ -1,3 +1,11 @@
+0.05 2008-11-20
+- sub mailheader which gives SPF-Received header
+- sub lookup_blocking for simple blocking lookup (for convinience)
+- script samples/spflookup.pl which does lookup from the command line
+  and returns SPF-Received header
+- clean up 'problem' messages, returns mechanism which matcht
+- better debugging
+
 0.04 2008-11-20
 - do not depend on additional DNS RR for resolving CNAME and finding 
   address for MX but still use them if found

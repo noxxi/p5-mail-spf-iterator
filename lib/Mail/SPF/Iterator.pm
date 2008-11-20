@@ -16,13 +16,17 @@ Mail::SPF::Iterator - iterative SPF lookup
 	# could be other resolvers too
 	my $resolver = Net::DNS::Resolver->new;
 
+	### with nonblocking, but still in loop
+	### (callbacks are prefered with non-blocking)
 	my ($result,@ans) = $spf->next; # initial query
-	while ( ! $status ) {
+	while ( ! $result ) {
 		my ($cbid,@query) = @ans;
 		die "no queries" if ! @query;
 		for my $q (@query) {
 			# resolve query
-			my $answer = $resolver->send( $q );
+			my $socket = $resolver->bgsend( $q );
+			... wait...
+			my $answer = $resolver->bgread($socket);
 			($result,@ans) = $spf->next( $cbid,$answer
 				? $answer                          # valid answer
 				: [ $q, $resolver->errorstring ]   # DNS problem
@@ -32,9 +36,17 @@ Mail::SPF::Iterator - iterative SPF lookup
 		}
 	}
 
+	### OR with blocking:
+	### ($result,@ans) = $spf->lookup_blocking( undef,$resolver );
+
+	### print mailheader
+	print $spf->mailheader( $result,@ans );
+
 	# $result = Fail|Pass|...
 	# $ans[0] = comment for Received-SPF
-	# $ans[1] = problem for Received-SPF on Fail
+	# $ans[1] = %hash for Received-SPF
+
+
 
 =head1 DESCRIPTION
 
@@ -82,9 +94,27 @@ CBID is the id for the query returned from the last call to C<next>. It is
 given to control, if the answer is for the current query.
 
 If a final result was achieved it will return
-C<< ( RESULT, COMMENT, PROBLEM ) >>. RESULT is the result, e.g. "Fail",
-"Pass",.... COMMENT is the comment for the Received-SPF header. PROBLEM is
-the problem for this header in the case of a failure (Fail, *Error)
+C<< ( RESULT, COMMENT, HASH ) >>. RESULT is the result, e.g. "Fail",
+"Pass",.... COMMENT is the comment for the Received-SPF header. HASH contains
+information about problem, mechanism for the Received-SPF header
+
+=item mailheader ( RESULT, COMMENT, HASH )
+
+Creates SPF-Received header based on the final answer from next().
+Returns header es string (one line, no folding).
+
+=item lookup_blocking ( [ TIMEOUT, RESOLVER ] )
+
+Quick way to get the SPF status.
+This will simply call C<next> until it gets a final result.
+
+TIMEOUT limits the lookup time and defaults to 20.
+RESOLVER is a Net::DNS::Resolver object (or similar) and  defaults to 
+C<< Net::DNS::Resolver->new >>.
+Returns ( RESULT, COMMENT, HASH ) like the final C<next> does.
+
+This is not the prefered way to use this module, because it's blocking, so
+no lookups can be done in parallel in a single process/thread.
 
 =back
 
@@ -120,7 +150,7 @@ use strict;
 use warnings;
 
 package Mail::SPF::Iterator;
-our $VERSION = 0.04;
+our $VERSION = 0.05;
 
 use fields qw( clientip4 clientip6 domain sender helo myname
 	include_stack cb cbq cbid validated limit_dns_mech
@@ -129,6 +159,7 @@ use fields qw( clientip4 clientip6 domain sender helo myname
 use Net::DNS;
 use Socket;
 use URI::Escape 'uri_escape';
+use Data::Dumper;
 use base 'Exporter';
 
 
@@ -205,8 +236,6 @@ my %qual2rv = (
 	'?' => SPF_Neutral,
 );
 
-
-
 ############################################################################
 # NEW
 # creates new SPF processing object
@@ -257,6 +286,74 @@ sub new {
 }
 
 ############################################################################
+# lookup blocking
+# not he intended way to use the module, but sometimes one needs to quickly
+# lookup something, even if it's blocking
+############################################################################
+sub lookup_blocking {
+	my ($self,$timeout,$resolver) = @_;
+
+	my $expire = time() + ( $timeout || 20 );
+	$resolver ||= Net::DNS::Resolver->new;
+
+	my ($status,@ans) = $self->next; # get initial queries
+	while ( ! $status ) {
+
+		# expired ?
+		$timeout = $expire - time();
+		last if $timeout < 0;
+
+		my ($cbid,@query) = @ans;
+		die "no more queries but no final status" if ! @query;
+		for my $q (@query) {
+			#DEBUG( "next query: ".$q->string );
+			my $socket = $resolver->bgsend( $q );
+
+			my $rin = '';
+			vec( $rin,fileno($socket),1) = 1;
+			select( $rin,undef,undef,$timeout ) or last; 
+
+			my $answer = $resolver->bgread( $socket );
+			($status,@ans) = $self->next( $cbid,$answer 
+				? $answer 
+				: [ $q, $resolver->errorstring ]
+			);
+			last if $status or @ans;
+		}
+	}
+	return ( SPF_TempError,'', { problem => 'DNS lookups timed out' } )
+		if ! $status;
+	return ($status,@ans);
+}
+
+############################################################################
+# mailheader 
+# create SPF-Received header from final response
+############################################################################
+sub mailheader {
+	my ($self,$result,$info,$hash) = @_;
+	my $t = "SPF-Received: $result ";
+	my %t = (
+		%$hash,
+		'client-ip' => ( 
+			$self->{clientip4} 
+				? inet_ntoa($self->{clientip4})
+				: inet_ntop(AF_INET6,$self->{clientip6}) 
+			),
+		helo => $self->{helo},
+		identity => ( $self->{sender} ? 'mailfrom':'helo' ),
+	);
+	for ( values(%t)) {
+		# Quote: this is not exactly rfc2822 but should be enough
+		s{([\"\\])}{\\$1}g;
+		$_ = qq("$_") if m{[\s;()]} or $_ eq '';
+	}
+	$t{'envelope-from'} = "<$self->{sender}>" if $self->{sender};
+	$t .= join( "; ", map { "$_=$t{$_}" } sort keys %t );
+	return $t;
+}
+
+############################################################################
 # NEXT
 # next step in SPF lookup
 # Args: ($cbid,$dnsresp)
@@ -265,8 +362,8 @@ sub new {
 # Returns: ($final,@args)
 #   $final: undef or something of Pass|Fail|SoftFail|Neutral|None|PermError|TermpError
 #   @args:  if !$final then ID+new DNS requests, if !@args the data were ignored
-#           if  $final $args[0] is info and $args[1] is problem description (on errors)
-#           for Received-SPF header
+#           if  $final $args[0] is info and %{$args[1]} is hash with mechanism, 
+#           problem... for Received-SPF header
 ############################################################################
 sub next {
 	my ($self,$cbid,$dnsresp) = @_;
@@ -319,7 +416,7 @@ sub next {
 				my %name = map { $_->{q}->qname => 1 } @$cb_queries;
 				return ( SPF_TempError,
 					"getting ".join("|",keys %want)." for ".join("|",keys %name),
-					"unexpected DNS response"
+					{ problem => "unexpected DNS response" },
 				);
 
 			} elsif ( ++$found->{done} > 1 ) {
@@ -335,7 +432,7 @@ sub next {
 					my %name = map { $_->{q}->qname => 1 } @$cb_queries;
 					return ( SPF_TempError,
 						"getting ".join("|",keys %want)." for ".join("|",keys %name),
-						"error getting DNS response"
+						{ problem => "error getting DNS response" }
 					);
 				}
 				# if we have outstanding queries return () as a sign, that we
@@ -355,11 +452,11 @@ sub next {
 
 	# loop until I get a final result
 	while (1) {
-		DEBUG( "loop rv=".Data::Dumper->new([\@rv])->Maxdepth(1)->Dump );
+		#DEBUG( "loop rv=".Data::Dumper->new([\@rv])->Maxdepth(1)->Dump );
 
 		##### ignored, try to find next action
 		if ( ! @rv ) {
-			DEBUG( "ignored" );
+			#DEBUG( "ignored" );
 			my $next = shift @{$self->{mech}};
 			if ( ! $next ) {
 
@@ -377,7 +474,7 @@ sub next {
 						return @err
 					}
 
-					return ( SPF_PermError, "","Number of DNS mechanism exceeded" )
+					return ( SPF_PermError, "", { problem => "Number of DNS mechanism exceeded" })
 						if --$self->{limit_dns_mech} < 0;
 
 					$self->{domain}   = $domain;
@@ -402,7 +499,7 @@ sub next {
 				}
 
 				# no more data
-				return ( SPF_Neutral );
+				return ( SPF_Neutral,'no matches' );
 			}
 
 			my ($sub,@arg) = @$next;
@@ -413,6 +510,7 @@ sub next {
 		##### list of DNS packets ? -> return as (undef,cbid,@pkts)
 		if ( UNIVERSAL::isa( $rv[0],'Net::DNS::Packet' )) {
 			$self->{cbq} = [ map { my ($q) = $_->question; { q => $q } } @rv ];
+			DEBUG( "need to lookup ".join( " ", map { "'".$_->{q}->string."'" } @{$self->{cbq}} ));
 			return ( undef, ++$self->{cbid}, @rv );
 		}
 
@@ -514,24 +612,26 @@ sub _check_domain {
 		&& $domain =~s{^($rx)\.?$}{$1} ) {
 		# looks like valid domain name
 		if ( grep { length == 0 || length>63 } split( m{\.}, $domain )) {
-			@rv = ( SPF_PermError,"query $why","DNS labels limited to 63 chars and should not be empty." );
+			@rv = ( SPF_PermError,"query $why", 
+				{ problem => "DNS labels limited to 63 chars and should not be empty." });
 		} elsif ( length($domain)>253 ) {
-			@rv = ( SPF_PermError,"query $why","Domain names limited to 253 chars." );
+			@rv = ( SPF_PermError,"query $why",
+				{ problem => "Domain names limited to 253 chars." });
 		} else {
-			DEBUG( "domain name ist OK" );
+			#DEBUG( "domain name ist OK" );
 			return
 		}
 	} else {
-		@rv = ( SPF_PermError, "query $why", "Invalid domain name" );
+		@rv = ( SPF_PermError, "query $why", { problem => "Invalid domain name" });
 	}
 
 	#DEBUG( Carp::longmess("error with domain name '$domain': @rv" ));
 
 	# have error
 	return @rv if ! defined $spf_level;
-	return ( SPF_None, "query $why", "not a domain name" )
+	return ( SPF_None, "query $why", { problem => "not a domain name" })
 		if $spf_level == 1; # initial SPF query -> don't report as error
-	return ( SPF_PermError, "query $why", "not a domain name" );
+	return ( SPF_PermError, "query $why", { problem => "not a domain name" });
 }
 
 ############################################################################
@@ -540,13 +640,13 @@ sub _check_domain {
 ############################################################################
 sub _query_txt_spf {
 	my $self = shift;
+	DEBUG( "want SPF/TXT for $self->{domain}" );
 	# return query for SPF and TXT, we see what we get first
 	if ( my @err = _check_domain($self->{domain}, "SPF/TXT record", $self->{cbid} == 0 ? 1:0 ) ) {
 		return @err;
 	}
 
 	$self->{cb} = [ \&_got_txt_spf ];
-	DEBUG( "want SPF/TXT for $self->{domain}" );
 	return (
 		scalar(Net::DNS::Packet->new( $self->{domain}, 'SPF','IN' )),
 		scalar(Net::DNS::Packet->new( $self->{domain}, 'TXT','IN' )),
@@ -562,7 +662,6 @@ sub _got_txt_spf {
 
 	my ($q) = $dnsresp->question;
 	my $qtype = $q->qtype;
-	DEBUG( "got $qtype for SPF/TXT query: ".$dnsresp->string );
 
 	my $rcode = $dnsresp->header->rcode;
 	for my $dummy ( $rcode eq 'NOERROR' ? (1):() ) {
@@ -581,14 +680,16 @@ sub _got_txt_spf {
 				$rrtype = $rr->type;
 				$rrtype eq 'TXT' or $rrtype eq 'SPF' or next;
 				my $txtdata = join( '', $rr->char_str_list );
-				push @spfdata,$1 if $txtdata =~m{^v=spf1(?:$| \s*)(.*)}i;
+				$txtdata =~m{^v=spf1(?:$| \s*)(.*)}i or next;
+				push @spfdata,$1;
+				DEBUG( "got spf data for $qtype: $txtdata" );
 			}
 		}
 		@spfdata or last; # no usable SPF reply
 		if (@spfdata>1) {
 			return ( SPF_PermError,
 				"checking $qtype for $self->{domain}",
-				"multiple SPF records"
+				{ problem => "multiple SPF records" }
 			);
 		}
 		unless ( eval { $self->_parse_spf( $spfdata[0] ) }) {
@@ -599,7 +700,7 @@ sub _got_txt_spf {
 			# they should be the same
 			return ( SPF_PermError,
 				"checking $qtype for $self->{domain}",
-				"invalid SPF record: $@"
+				{ problem => "invalid SPF record: $@" }
 			);
 		}
 
@@ -610,6 +711,7 @@ sub _got_txt_spf {
 	# FAILED:
 	# If this is the first response, wait for the other
 	if ( grep { ! $_->{done} } @{ $self->{cbq}} ) {
+		DEBUG( "no records for $qtype ($rcode)" );
 		return (SPF_Noop);
 	}
 
@@ -617,8 +719,10 @@ sub _got_txt_spf {
 	# return SPF_None if this was the initial query ($self->{mech} is undef)
 	# and SPF_PermError if as a result from redirect or include
 	# ($self->{mech} is [])
+	DEBUG( "no usable SPF/TXT records" );
 	return ( $self->{mech} ? SPF_PermError : SPF_None,
-		'no SPF records provided' );
+		'query SPF/TXT record',
+		{ problem => 'no SPF records found' });
 }
 
 
@@ -637,33 +741,33 @@ sub _parse_spf {
 			|[a-zA-Z][\w.\-]*=  # unknown modifier + '='
 		)(.*)  # Arguments
 		$}x
-			or die "bad SPF part: $_";
+			or die "bad SPF part: $_\n";
 
 		if ( $mech ) {
 			$qual = $qual2rv{ $qual || '+' };
 
 			if ( $mech eq 'all' ) {
-				die "no arguments allowed with mechanism 'all': '$_'"
+				die "no arguments allowed with mechanism 'all': '$_'\n"
 					if $arg ne '';
 				push @mech, [ \&_mech_all, $qual ]
 
 			} elsif ( $mech eq 'ip4' ) {
 				my ($ip,$plen) = $arg =~m{^:(\d+\.\d+\.\d+\.\d+)(?:/([1-9]\d*|0))?$}
-					or die "bad argument for mechanism 'ip4' in '$_'";
+					or die "bad argument for mechanism 'ip4' in '$_'\n";
 				$plen = 32 if ! defined $plen;
-				$plen>32 and die "invalid prefix len >32 in '$_'";
+				$plen>32 and die "invalid prefix len >32 in '$_'\n";
 				eval { $ip = inet_aton( $ip ) }
-					or die "bad ip '$ip' in '$_'";
+					or die "bad ip '$ip' in '$_'\n";
 				next if ! $self->{clientip4}; # don't use for IP6
 				push @mech, [ \&_mech_ip4, $qual, $ip,$plen ];
 
 			} elsif ( $mech eq 'ip6' ) {
 				my ($ip,$plen) = $arg =~m{^:([\da-fA-F:\.]+)(?:/([1-9]\d*|0))?$}
-					or die "bad argument for mechanism 'ip6' in '$_'";
+					or die "bad argument for mechanism 'ip6' in '$_'\n";
 				$plen = 128 if ! defined $plen;
-				$plen>128 and die "invalid prefix len >128 in '$_'";
+				$plen>128 and die "invalid prefix len >128 in '$_'\n";
 				eval { $ip = inet_pton( AF_INET6,$ip ) }
-					or die "bad ip '$ip' in '$_'"
+					or die "bad ip '$ip' in '$_'\n"
 					if $can_ip6;
 				next if ! $self->{clientip6}; # don't use for IP4
 				push @mech, [ \&_mech_ip6, $qual, $ip,$plen ];
@@ -671,11 +775,11 @@ sub _parse_spf {
 			} elsif ( $mech eq 'a' or $mech eq 'mx' ) {
 				my ($domain,$plen4,$plen6) =
 					( $arg || '' )=~m{^(?::(.+?))?(?:/(?:([1-9]\d*|0)|/([1-9]\d*|0)))?$}
-					or die "bad argument for mechanism '$mech' in '$_'";
+					or die "bad argument for mechanism '$mech' in '$_'\n";
 				if ( defined $plen4 ) {
-					$plen4>32 and die "invalid prefix len >32 in '$_'";
+					$plen4>32 and die "invalid prefix len >32 in '$_'\n";
 				} elsif ( defined $plen6 ) {
-					$plen6>128 and die "invalid prefix len >128 in '$_'";
+					$plen6>128 and die "invalid prefix len >128 in '$_'\n";
 				}
 				if ( $self->{clientip4} ) {
 					next if defined $plen6; # ignore IP6 checks when we are using IP4
@@ -688,7 +792,7 @@ sub _parse_spf {
 					$domain = $self->{domain};
 				} else {
 					if ( my @err = _check_macro_domain($domain)) {
-						die $err[2] || 'Invalid domain name';
+						die(( $err[2]->{problem} || "Invalid domain name" )."\n" );
 					}
 					$domain = $self->_macro_expand($domain);
 				}
@@ -698,27 +802,27 @@ sub _parse_spf {
 
 			} elsif ( $mech eq 'ptr' ) {
 				my ($domain) = ( $arg || '' )=~m{^(?::([^/]+))?$}
-					or die "bad argument for mechanism '$mech' in '$_'";
+					or die "bad argument for mechanism '$mech' in '$_'\n";
 				$domain = $domain ? $self->_macro_expand($domain) : $self->{domain};
 				push @mech, [ \&_resolve_macro_p, $domain ] if ref($domain);
 				push @mech, [ \&_mech_ptr, $qual, $domain ];
 
 			} elsif ( $mech eq 'exists' ) {
 				my ($domain) = ( $arg || '' )=~m{^:([^/]+)$}
-					or die "bad argument for mechanism '$mech' in '$_'";
+					or die "bad argument for mechanism '$mech' in '$_'\n";
 				$domain = $self->_macro_expand($domain);
 				push @mech, [ \&_resolve_macro_p, $domain ] if ref($domain);
 				push @mech, [ \&_mech_exists, $qual, $domain ];
 
 			} elsif ( $mech eq 'include' ) {
 				my ($domain) = ( $arg || '' )=~m{^:([^/]+)$}
-					or die "bad argument for mechanism '$mech' in '$_'";
+					or die "bad argument for mechanism '$mech' in '$_'\n";
 				$domain = $self->_macro_expand($domain);
 				push @mech, [ \&_resolve_macro_p, $domain ] if ref($domain);
 				push @mech, [ \&_mech_include, $qual, $domain ];
 
 			} else {
-				die "unhandled mechanism '$mech'"
+				die "unhandled mechanism '$mech'\n"
 			}
 
 		} elsif ( $mod ) {
@@ -726,25 +830,25 @@ sub _parse_spf {
 			# explain - they don't make sense, but we won't consider
 			# it as an error here, we just use only the first spec
 			if ( $mod eq 'redirect' ) {
-				die "redirect was specified more than once" if $redirect;
+				die "redirect was specified more than once\n" if $redirect;
 				my ($domain) = ( $arg || '' )=~m{^=([^/]+)$}
-					or die "bad argument for modifier '$mod' in '$_'";
+					or die "bad argument for modifier '$mod' in '$_'\n";
 				if ( my @err = _check_macro_domain($domain)) {
-					die $err[2] || 'Invalid domain name';
+					die(( $err[2]->{problem} || "Invalid domain name" )."\n" );
 				}
 				$redirect = $self->_macro_expand($domain);
 
 			} elsif ( $mod eq 'exp' ) {
-				die "$explain was specified more than once" if $explain;
+				die "$explain was specified more than once\n" if $explain;
 				my ($domain) = ( $arg || '' )=~m{^=([^/]+)$}
-					or die "bad argument for modifier '$mod' in '$_'";
+					or die "bad argument for modifier '$mod' in '$_'\n";
 				if ( my @err = _check_macro_domain($domain)) {
-					die $err[2] || 'Invalid domain name';
+					die(( $err[2]->{problem} || "Invalid domain name" )."\n" );
 				}
 				$explain = $self->_macro_expand($domain);
 
 			} elsif ( $mod ) {
-				die "unhandled modifier '$mod'"
+				die "unhandled modifier '$mod'\n"
 			}
 		} else {
 			# unknown modifier - check if arg is valid macro-string
@@ -764,7 +868,8 @@ sub _parse_spf {
 ############################################################################
 sub _mech_all {
 	my ($self,$qual) = @_;
-	return ( $qual,'matches default');
+	DEBUG( "mech all with qual=$qual" );
+	return ( $qual,'matches default', { mechanism => 'all' });
 }
 
 ############################################################################
@@ -773,8 +878,9 @@ sub _mech_all {
 ############################################################################
 sub _mech_ip4 {
 	my ($self,$qual,$ip,$plen) = @_;
+	DEBUG( "mech ip4:".inet_ntoa($ip)."/$plen with qual=$qual" );
 	defined $self->{clientip4} or return (); # ignore rule, no IP4 address
-	return ($qual,"matches ip4:".inet_ntoa($ip)."/$plen" )
+	return ($qual,"matches ip4:".inet_ntoa($ip)."/$plen", { mechanism => 'ip4' } )
 		if ($self->{clientip4} & $mask4[$plen]) eq ($ip & $mask4[$plen]); # rules matches
 	return (); # ignore, no match
 }
@@ -785,8 +891,9 @@ sub _mech_ip4 {
 ############################################################################
 sub _mech_ip6 {
 	my ($self,$qual,$ip,$plen) = @_;
+	DEBUG( "mech ip6:".inet_ntop(AF_INET6,$ip)."/$plen with qual=$qual" );
 	defined $self->{clientip6} or return (); # ignore rule, no IP6 address
-	return ($qual,"matches ip6:".inet_ntop(AF_INET6,$ip)."/$plen" )
+	return ($qual,"matches ip6:".inet_ntop(AF_INET6,$ip)."/$plen", { mechanism => 'ip6' } )
 		if ($self->{clientip6} & $mask6[$plen]) eq ($ip & $mask6[$plen]); # rules matches
 	return (); # ignore, no match
 }
@@ -800,6 +907,7 @@ sub _mech_ip6 {
 sub _mech_a {
 	my ($self,$qual,$domain,$plen) = @_;
 	$domain = $domain->{expanded} if ref $domain;
+	DEBUG( "mech a:$domain/$plen with qual=$qual" );
 	if ( my @err = _check_domain($domain, "a:$domain/$plen")) {
 		# spec is not clear here:
 		# variante1: no match on invalid domain name -> return
@@ -808,11 +916,11 @@ sub _mech_a {
 		return @err;
 	}
 
-	return ( SPF_PermError, "","Number of DNS mechanism exceeded" )
+	return ( SPF_PermError, "",{ problem => "Number of DNS mechanism exceeded" })
 		if --$self->{limit_dns_mech} < 0;
 
 	my $typ = $self->{clientip4} ? 'A':'AAAA';
-	$self->{cb} = [ \&_got_A, $qual,$typ,$plen,[ [$domain,0] ] ];
+	$self->{cb} = [ \&_got_A, $qual,$typ,$plen,[ [$domain,0] ],'a' ];
 	return scalar(Net::DNS::Packet->new( $domain, $typ,'IN' ));
 }
 
@@ -825,15 +933,17 @@ sub _mech_a {
 # will also resolve CNAME if address is not inside additional data
 ############################################################################
 sub _got_A {
-	my ($self,$dnsresp,$qual,$typ,$plen,$names) = @_;
+	my ($self,$dnsresp,$qual,$typ,$plen,$names,$mech) = @_;
 	my ($domain,$depth) = @{ shift(@$names) };
 
-	if ( $dnsresp->header->rcode eq 'NXDOMAIN' ) {
+	my $rcode = $dnsresp->header->rcode;
+	DEBUG( "got response to $typ for $domain: $rcode" );
+	if ( $rcode eq 'NXDOMAIN' ) {
 		# no records found
-	} elsif ( $dnsresp->header->rcode ne 'NOERROR' ) {
+	} elsif ( $rcode ne 'NOERROR' ) {
 		return ( SPF_TempError,
 			"getting $typ for $domain",
-			"error resolving $domain"
+			{ problem => "error resolving $domain" }
 		);
 	}
 
@@ -858,40 +968,44 @@ sub _got_A {
 
 	push @$names, map { $cname{$_} ? (): ([ $_, $depth+1 ]) } keys %cname;  # unresolved CNAME
 	{ my %h; @$names = grep { ! $h{$_}++ } @$names; } # uniq
-	return _check_A_match($self,$qual,$domain,$plen,\@addr,$names);
+	return _check_A_match($self,$qual,$domain,$plen,\@addr,$names,$mech);
 }
 
 sub _check_A_match {
-	my ($self,$qual,$domain,$plen,$addr,$names) = @_;
+	my ($self,$qual,$domain,$plen,$addr,$names,$mech) = @_;
 	
 	# process all found addresses
 	if ( $self->{clientip4} ) {
 		$plen = 32 if ! defined $plen;
 		my $mask = $mask4[$plen];
 		for my $addr (@$addr) {
+			DEBUG( "check $domain($addr)/$plen" );
 			my $packed = $addr=~m{^[\d.]+$} && eval { inet_aton($addr) }
 				or return ( SPF_TempError,
 					"getting A for $domain",
-					"bad address in A record"
+					{ problem => "bad address in A record" }
 				);
 			
 			if ( ($packed & $mask) eq  ($self->{clientip4} & $mask) ) {
 				# match!
-				return ($qual,"matches domain: $domain/$plen with IP4 $addr" )
+				return ($qual,"matches domain: $domain/$plen with IP4 $addr",
+					{ mechanism => $mech })
 			}
 		}
 	} else { # AAAA
 		$plen = 128 if ! defined $plen;
 		my $mask = $mask6[$plen];
 		for my $addr (@$addr) {
+			DEBUG( "check $domain($addr)/$plen" );
 			my $packed = eval { inet_pton(AF_INET6,$addr) }
 				or return ( SPF_TempError,
 					"getting AAAA for $domain",
-					"bad address in AAAA record"
+					{ problem => "bad address in AAAA record" }
 				);
 			if ( ($packed & $mask) eq ($self->{clientip6} & $mask) ) {
 				# match!
-				return ($qual,"matches domain: $domain//$plen with IP6 $addr" )
+				return ($qual,"matches domain: $domain//$plen with IP6 $addr",
+					{ mechanism => $mech })
 			}
 		}
 	}
@@ -904,7 +1018,7 @@ sub _check_A_match {
 			next;
 		}
 		my $typ = $self->{clientip4} ? 'A':'AAAA';
-		$self->{cb} = [ \&_got_A, $qual,$typ,$plen,$names ];
+		$self->{cb} = [ \&_got_A, $qual,$typ,$plen,$names,$mech ];
 		return scalar(Net::DNS::Packet->new( $names->[0][0], $typ,'IN' ));
 	}
 
@@ -922,11 +1036,12 @@ sub _check_A_match {
 sub _mech_mx {
 	my ($self,$qual,$domain,$plen) = @_;
 	$domain = $domain->{expanded} if ref $domain;
+	DEBUG( "mech mx:$domain/$plen with qual=$qual" );
 	if ( my @err = _check_domain($domain, "mx:$domain".( defined $plen ? "/$plen":"" ))) {
 		return @err
 	}
 
-	return ( SPF_PermError, "","Number of DNS mechanism exceeded" )
+	return ( SPF_PermError, "",{ problem => "Number of DNS mechanism exceeded" })
 		if --$self->{limit_dns_mech} < 0;
 
 	$self->{cb} = [ \&_got_MX,$qual,$domain,$plen ];
@@ -941,7 +1056,7 @@ sub _got_MX {
 	} elsif ( $dnsresp->header->rcode ne 'NOERROR' ) {
 		return ( SPF_TempError,
 			"getting MX form $domain",
-			"error resolving $domain"
+			{ problem => "error resolving $domain" }
 		);
 	}
 
@@ -964,11 +1079,12 @@ sub _got_MX {
 			$mx{$rr->name}++;
 		}
 	}
+	DEBUG( "found mx for $domain: ".join( " ", keys %mx ));
 
 	# remove from %mx where I've found addresses
 	delete @mx{ grep { $mx{$_} } keys %mx };
 
-	return _check_A_match( $self,$qual,$domain,$plen,\@addr,[ map { [$_,0] } keys %mx ]);
+	return _check_A_match( $self,$qual,$domain,$plen,\@addr,[ map { [$_,0] } keys %mx ],'mx');
 }
 
 ############################################################################
@@ -979,11 +1095,12 @@ sub _got_MX {
 sub _mech_exists {
 	my ($self,$qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
+	DEBUG( "mech exists:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "exists:$domain" )) {
 		return @err
 	}
 
-	return ( SPF_PermError, "","Number of DNS mechanism exceeded" )
+	return ( SPF_PermError, "", { problem => "Number of DNS mechanism exceeded" })
 		if --$self->{limit_dns_mech} < 0;
 
 	$self->{cb} = [ \&_got_A_exists,$qual,$domain ];
@@ -1014,7 +1131,7 @@ sub _got_A_exists {
 	}
 
 	return if ! @answer; # no A records
-	return ($qual,"domain $domain exists" )
+	return ($qual,"domain $domain exists", { mechanism => 'exists' } )
 }
 
 
@@ -1031,11 +1148,12 @@ sub _got_A_exists {
 sub _mech_ptr {
 	my ($self,$qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
+	DEBUG( "mech ptr:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "ptr:$domain" )) {
 		return @err
 	}
 
-	return ( SPF_PermError, "","Number of DNS mechanism exceeded" )
+	return ( SPF_PermError, "", { problem => "Number of DNS mechanism exceeded" })
 		if --$self->{limit_dns_mech} < 0;
 
 	my $ip = $self->{clientip4} || $self->{clientip6};
@@ -1143,7 +1261,7 @@ sub _got_A_ptr {
 
 		# return $qual if we have verified the ptr
 		if ( $match ) {
-			return ( $qual,"verified clientip with ptr" )
+			return ( $qual,"verified clientip with ptr", { mechanism => 'ptr' })
 		}
 	}
 
@@ -1164,11 +1282,12 @@ sub _got_A_ptr {
 sub _mech_include {
 	my ($self,$qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
+	DEBUG( "mech include:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "include:$domain" )) {
 		return @err
 	}
 
-	return ( SPF_PermError, "","Number of DNS mechanism exceeded" )
+	return ( SPF_PermError, "", { problem => "Number of DNS mechanism exceeded" })
 		if --$self->{limit_dns_mech} < 0;
 
 	# push and reset current domain and SPF record
@@ -1233,7 +1352,7 @@ sub _macro_expand {
 	my $mchars = $explain ? qr{[slodipvhcrt]}i : qr{[slodipvh]}i;
 	my $need_validated;
 	DEBUG( Carp::longmess("keine domain" )) if ! $domain;
-	DEBUG( "domain=$domain" );
+	#DEBUG( "domain=$domain" );
 	while ( $domain =~ m{\G (?:
 		([^%]+) |                                              # text
 		%(?:
@@ -1292,13 +1411,13 @@ sub _macro_expand {
 						}
 					}
 				} :
-				die "unknown macro $macro";
+				die "unknown macro $macro\n";
 
 			my $rx = eval "qr{[$macro_delim]}";
 			my @parts = split( $rx, $expand );
 			@parts = reverse @parts if $macro_r;
 			if ( length $macro_n ) {
-				die "bad macro definition '$domain'" if ! $macro_n; # must be != 0
+				die "bad macro definition '$domain'\n" if ! $macro_n; # must be != 0
 				@parts = splice( @parts,-$macro_n );
 			}
 			$new_domain .= join('.',@parts);
@@ -1308,7 +1427,7 @@ sub _macro_expand {
 			}
 
 		} else {
-			die "bad macro definition '$domain'";
+			die "bad macro definition '$domain'\n";
 		}
 	}
 
