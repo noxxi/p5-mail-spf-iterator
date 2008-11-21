@@ -30,6 +30,7 @@ use Data::Dumper;
 
 $|=1;
 my $DEBUG=1;
+$Mail::SPF::Iterator::DEBUG = $DEBUG;
 
 for my $use_additionals ('with additionals','') {
 	for my $test ( @$Tests ) {
@@ -43,27 +44,36 @@ for my $use_additionals ('with additionals','') {
 		);
 		for my $tname (sort keys %$subtests) {
 			my $tdata = $subtests->{$tname};
-			my $result = $tdata->{result};
+
+			my %d = %$tdata;
+			delete @d{qw/description comment/};
+			my $explanation = delete $d{explanation};
+
+			my $result = delete $d{result};
 			$result = [ $result ] if ! ref $result;
 			$_=lc for(@$result);
 
-			my $spec = $tdata->{spec};
+			my $spec = delete $d{spec};
 			$spec = [ $spec ] if ! ref($spec);
 			my $comment =  "$desc | $tname (@$spec) (@$result) $use_additionals";
 
-			if ( ! $can_ip6 and ( $tdata->{host} =~m{::} or $tname =~m{ip6} )) {
+			if ( ! $can_ip6 and ( $d{host} =~m{::} or $tname =~m{ip6} )) {
 				print "ok # skip Socket6.pm not installed\n";
 				next;
 			}
 
-			my $status = '';
+			if ( $tname eq 'p-macro-ip4-valid' ) {
+				# FIXME: we cannot do %{p} expansion in macros
+				print "ok # skip TODO %{p} expansion in macros\n";
+				next;
+			}
+
 			# capture debug output of failed cases
 			my $debug = '';
 			eval {
 				open( my $dbg, '>',\$debug );
 				local *STDERR = $dbg;
 
-				my %d = %$tdata;
 				my $spf = eval {
 					Mail::SPF::Iterator->new(
 						delete $d{host},
@@ -72,13 +82,14 @@ for my $use_additionals ('with additionals','') {
 					);
 				};
 				die "no spf: $@\n".Dumper($tdata) if ! $spf;
+				die "unhandled args :".Dumper(\%d) if %d;
 
-				($status, my @ans) = $spf->next;
+				my ($status,@ans) = $spf->next;
 				while ( ! $status ) {
 					my ($cbid,@query) = @ans;
 					die "no queries" if ! @query;
 					for my $q (@query) {
-						#DEBUG( "next query: ".$q->string );
+						#DEBUG( "next query >>> ".($q->question)[0]->string );
 						my $answer = $resolver->send( $q );
 						($status,@ans) = $spf->next( $cbid,$answer 
 							? $answer 
@@ -88,27 +99,49 @@ for my $use_additionals ('with additionals','') {
 						last if $status or @ans;
 					}
 				}
-				$status = lc($status);
-				if ( ! grep { $status eq $_ } @$result ) {
-					die "  .. got status=$status tdata=".Dumper($tdata)."ans=@ans\n";
-				} elsif ( $status ne $result->[0] ) {
-					if ( $tname =~m{^(mx|ptr)-limit$} ) {
-						#### spec: "... The SPF result is effectively randomized."
-						print "------- got $status, expected @$result\n";
-					} else {
-						die "------- got $status, expected @$result\n".Dumper($tdata);
-					}
-				}
+				die bless [ lc($status),@ans ],'SPFResult';
 			};
-			if ( $@ ) {
-				print "not ok # $comment - got $status\n";
-				( my $t = "$debug\n$@" ) =~s{^}{| }mg;
+
+			if ( ref($@) ne 'SPFResult' ) {
+				print "not ok # $comment - error\n";
+				( my $t = $@."\n".$debug ) =~s{^}{| }mg;
 				print $t;
-			} elsif ( $status ne $result->[0] ) {
-				print "ok # $comment - got $status\n";
-			} else {
-				print "ok # $comment\n";
+				next;
 			}
+
+			my ($status,$info,$hash) = @{$@};
+			if ( ! grep { $status eq $_ } @$result ) {
+				print "not ok # $comment - got $status\n";
+				$debug =~s{^}{| }mg;
+				print $debug;
+				next;
+			}
+
+			if ( $explanation ) {
+				$explanation = $Mail::SPF::Iterator::EXPLAIN_DEFAULT 
+					if $explanation eq 'DEFAULT';
+				if ( $hash->{_explain} ne $explanation ) {
+					print "not ok # $comment - exp should be '$explanation' was '$hash->{_explain}'\n";
+					$debug =~s{^}{| }mg;
+					print $debug;
+					next;
+				}
+			}
+
+			if ( $status ne $result->[0] ) {
+				if ( $tname =~m{^(mx|ptr)-limit$} ) {
+					#### spec: "... The SPF result is effectively randomized."
+					print "ok # $comment - got $status\n";
+				} else {
+					print "not ok # $comment - got $status\n";
+					$debug =~s{^}{| }mg;
+					print $debug;
+				}
+				next;
+			}
+
+
+			print "ok # $comment\n";
 		}
 	}
 }
@@ -156,7 +189,7 @@ sub send {
 
 	$self->_reset_errorstring;
 
-	DEBUG( "query=".$q->string );
+	DEBUG( "got query=".$q->string );
 
 	( my $key = $qname) =~s{\.$}{};
 	if ( my @match = grep { lc($key) eq lc($_) } keys %{ $self->{records}} ) {

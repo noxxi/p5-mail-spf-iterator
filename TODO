@@ -1,0 +1,3 @@
+- Test Abbruch bei CNAME ketten
+- TODOs im Code beseitigen: expand %{p} macro in exp=
+  und TXT, der für explain kommt
