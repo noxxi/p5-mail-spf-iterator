@@ -124,7 +124,6 @@ for my $use_additionals ('with additionals','') {
 					print "not ok # $comment - exp should be '$explanation' was '$hash->{_explain}'\n";
 					$debug =~s{^}{| }mg;
 					print $debug;
-					die;
 					next;
 				}
 			}
