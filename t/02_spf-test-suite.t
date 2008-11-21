@@ -62,7 +62,7 @@ for my $use_additionals ('with additionals','') {
 				next;
 			}
 
-			if ( $tname eq 'p-macro-ip4-valid' ) {
+			if ( $tname =~m{^p-macro-ip[46]-valid$} ) {
 				# FIXME: we cannot do %{p} expansion in macros
 				print "ok # skip TODO %{p} expansion in macros\n";
 				next;
@@ -124,6 +124,7 @@ for my $use_additionals ('with additionals','') {
 					print "not ok # $comment - exp should be '$explanation' was '$hash->{_explain}'\n";
 					$debug =~s{^}{| }mg;
 					print $debug;
+					die;
 					next;
 				}
 			}

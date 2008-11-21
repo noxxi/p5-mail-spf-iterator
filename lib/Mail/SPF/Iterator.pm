@@ -1378,18 +1378,22 @@ sub _got_TXT_exp {
 		}
 
 		# valid TXT record found -> expand macros
-		if ( $txtdata and ( my $t = eval { $self->_macro_expand( $txtdata,'exp' ) })) {
-			# TODO
-			# we don't compute any expansion for %{p} here. If there
-			# is a %{p} not resolved here we replace it with 'unknown'
-			$t = $t->{expanded} if ref($t);
-			# result should be limited to US-ASCII!
-			# further limit to printable chars
-			if ( $t !~m{[\x00-\x1f\x7e-\xff]} ) {
-				$rv[2]{_explain} = $t;
-				return @rv
+		if ( $txtdata ) {
+			my $t = eval { $self->_macro_expand( $txtdata,'exp' ) };
+			if ($@) {
+				DEBUG( "macro expansion of '$txtdata' failed: $@" );
+			} else {
+				# TODO
+				# we don't compute any expansion for %{p} here. If there
+				# is a %{p} not resolved here we replace it with 'unknown'
+				$t = $t->{expanded} if ref($t);
+				# result should be limited to US-ASCII!
+				# further limit to printable chars
+				if ( $t !~m{[\x00-\x1f\x7e-\xff]} ) {
+					$rv[2]{_explain} = $t;
+					return @rv
+				}
 			}
-
 		}
 	}
 
@@ -1438,12 +1442,12 @@ sub _macro_expand {
 				$imacro eq 'd' ? $self->{domain} :
 				$imacro eq 'i' ? $self->{clientip4} ?
 					inet_ntoa($self->{clientip4}) :
-					do { ( my $x = inet_ntop($self->{clientip6})) =~s{:}{.}g; $x } :
+					join('.',map { uc } split(//,unpack( "H*",$self->{clientip6}))) :
 				$imacro eq 'v' ? $self->{clientip4} ? 'in-addr' : 'ip6':
 				$imacro eq 'h' ? $self->{helo} :
 				$imacro eq 'c' ? $self->{clientip4} ?
 					inet_ntoa($self->{clientip4}) :
-					inet_ntop($self->{clientip6}) :
+					inet_ntop(AF_INET6,$self->{clientip6}) :
 				$imacro eq 'r' ? $self->{myname} || 'unknown' :
 				$imacro eq 't' ? time() :
 				$imacro eq 'p' ? do {

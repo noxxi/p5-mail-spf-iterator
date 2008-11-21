@@ -1,6 +1,7 @@
 0.06 2008-11-21
 - exp method works for most cases, except when it contains %{p} macro
   which in most cases will be replaced with 'unknown'
+- fix for interpretation of %{i} for IP6
 - better debugging
 - script samples/spflookup.pl which does lookup from the command line
   and returns SPF-Received header
