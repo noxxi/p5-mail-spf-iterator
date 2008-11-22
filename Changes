@@ -1,3 +1,11 @@
+0.07 2008-11-22
+- %{p} macro gets now expanded in TXT for explain (but still not in
+  exp=..%{p}.. modifiers)
+- method result to get result (before next gives the final result,
+  in case one don't want to lookup %{p} in explain)
+- method mailheader doesn't take arguments anymore, because result
+  gets stored in the object
+
 0.06 2008-11-21
 - exp method works for most cases, except when it contains %{p} macro
   which in most cases will be replaced with 'unknown'

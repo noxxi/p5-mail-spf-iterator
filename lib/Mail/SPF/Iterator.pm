@@ -40,7 +40,7 @@ Mail::SPF::Iterator - iterative SPF lookup
 	### ($result,@ans) = $spf->lookup_blocking( undef,$resolver );
 
 	### print mailheader
-	print $spf->mailheader( $result,@ans );
+	print $spf->mailheader;
 
 	# $result = Fail|Pass|...
 	# $ans[0] = comment for Received-SPF
@@ -94,14 +94,26 @@ CBID is the id for the query returned from the last call to C<next>. It is
 given to control, if the answer is for the current query.
 
 If a final result was achieved it will return
-C<< ( RESULT, COMMENT, HASH ) >>. RESULT is the result, e.g. "Fail",
+C<< ( RESULT, COMMENT, HASH, EXPLAIN ) >>. RESULT is the result, e.g. "Fail",
 "Pass",.... COMMENT is the comment for the Received-SPF header. HASH contains
-information about problem, mechanism for the Received-SPF header
+information about problem, mechanism for the Received-SPF header.
+EXPLAIN will be set to the explain string if RESULT is Fail.
 
-=item mailheader ( RESULT, COMMENT, HASH )
+=item mailheader
 
-Creates Received-SPF header based on the final answer from next().
-Returns header es string (one line, no folding).
+Creates value for Received-SPF header based on the final answer from next().
+Returns header as string (one line, no folding) or undef, if no final result
+was found.
+This creates only the value, not the 'Received-SPF' prefix.
+
+=item result
+
+Returns ( RESULT, COMMENT, HASH, EXPLAIN ) like the final C<next> does or () if the
+final result wasn't found yet.
+
+If the SPF record had an explain modifier, which needed DNS lookups to resolve
+this method might return the result (although with incomplete explain) before
+C<next> does it.
 
 =item lookup_blocking ( [ TIMEOUT, RESOLVER ] )
 
@@ -151,13 +163,13 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = 0.06;
+our $VERSION = 0.07;
 our $DEBUG=0;
 our $EXPLAIN_DEFAULT = "SPF Check Failed";
 
 use fields qw( clientip4 clientip6 domain sender helo myname
 	include_stack cb cbq cbid validated limit_dns_mech
-	mech redirect explain );
+	mech redirect explain result );
 
 use Net::DNS;
 use Socket;
@@ -283,8 +295,18 @@ sub new {
 		mech => undef,         # spf mechanism
 		redirect => undef,     # redirect from SPF record
 		explain => undef,      # explain from SPF record
+		result => undef,       # final result [ SPF_*, info, \%hash ]
 	);
 	return $self;
+}
+
+############################################################################
+# return result
+############################################################################
+sub result {
+	my $self = shift;
+	my $r = $self->{result} or return;
+	return @$r;
 }
 
 ############################################################################
@@ -330,11 +352,12 @@ sub lookup_blocking {
 
 ############################################################################
 # mailheader
-# create Received-SPF header from final response
+# create value for Received-SPF header for final response
 ############################################################################
 sub mailheader {
-	my ($self,$result,$info,$hash) = @_;
-	my $t = "Received-SPF: $result ";
+	my $self = shift;
+	my ($result,$info,$hash) = @{ $self->{result} || return };
+	my $t = "$result ";
 	my %t = (
 		%$hash,
 		'client-ip' => (
@@ -345,7 +368,6 @@ sub mailheader {
 		helo => $self->{helo},
 		identity => ( $self->{sender} ? 'mailfrom':'helo' ),
 	);
-	delete @t{ grep { /^_/ } keys %t }; # no internal keys like _explain
 	for ( values(%t)) {
 		# Quote: this is not exactly rfc2822 but should be enough
 		s{([\"\\])}{\\$1}g;
@@ -433,16 +455,22 @@ sub next {
 		}
 
 		if ( $err ) {
-			# if we got an error and no outstanding DNS queries we consider
-			# this action as failed -> TempError
 			if ( grep { ! $_->{done} } @$cb_queries ) {
 				# we have outstanding queries return () as a sign, that we
 				# ignore this error
-				DEBUG( "ignore error, because we have more oustanding queries" );
+				DEBUG( "ignore error '$err', because we have more oustanding queries" );
 				return;
-			} elsif ( ! $found->{exp} ) {
-				# important queries, throw TempError
-				DEBUG( "throw TempError, because the query was no exp" );
+
+			} elsif ( my $r = $self->{result} ) {
+				# we have a final result already, so this is an error looking up data
+				# for explain ->1 set to default explain and return final result
+				DEBUG( "error looking up data for explain: $err" );
+				return @$r;
+
+			} else {
+				# we have no final result yet (e.g this query was not triggered by
+				# lookups for explain data) -> TempError
+				DEBUG( "TempError: $err" );
 				my %want = map { $_->{q}->qtype => 1 } @$cb_queries;
 				my %name = map { $_->{q}->qname => 1 } @$cb_queries;
 				return ( SPF_TempError,
@@ -462,7 +490,6 @@ sub next {
 	}
 
 	# loop until I get a final result
-	my $need_explanation; # Flag if we set up request for resolving exp:..
 	for my $dummy (1) {
 
 		#DEBUG( "loop rv=".Data::Dumper->new([\@rv])->Maxdepth(1)->Dump );
@@ -470,6 +497,16 @@ sub next {
 		##### ignored, try to find next action
 		if ( ! @rv ) {
 			#DEBUG( "ignored" );
+
+			if ( my $exp = ( $self->{result} && delete $self->{result}[4] )) {
+				# we had a %{p} to resolve in the TXT we got for explain, see _got_TXT_exp
+				# should be expanded now
+				$self->{result}[3] = $exp->{expanded};
+
+				# This was the last action needed
+				return @{ $self->{result}};
+			}
+
 			my $next = shift @{$self->{mech}};
 			if ( ! $next ) {
 
@@ -524,11 +561,6 @@ sub next {
 		##### list of DNS packets ? -> return as (undef,cbid,@pkts)
 		if ( UNIVERSAL::isa( $rv[0],'Net::DNS::Packet' )) {
 			$self->{cbq} = [ map { my ($q) = $_->question; { q => $q } } @rv ];
-			if ($need_explanation) {
-				# mark so that it does not trigger TempError on error
-				map { $_->{exp} = 1 } @{ $self->{cbq}};
-				$need_explanation = 0;
-			}
 			DEBUG( "need to lookup ".join( " | ", map { "'".$_->{q}->string."'" }
 				@{$self->{cbq}} ));
 			return ( undef, ++$self->{cbid}, @rv );
@@ -568,34 +600,36 @@ sub next {
 			return;
 		}
 
-		# if we have a Fail but no description but an explain modifier
-		# then use it as the description
-		if ( $rv[0] eq SPF_Fail and ! exists $rv[2]{_explain} ) {
-			if ( my $exp = $self->{explain} ) {
-				if (ref $exp) {
-					if ( my @xrv = $self->_resolve_macro_p($exp)) {
-						# TODO
-						# we need to do more DNS lookups for resolving %{p} macros
-						# for now they simply get replace with 'unknown'
-					}
-					$exp = $self->{explain} = $exp->{expanded};
+		my $final = $self->{result} ||= [ @rv ];
+		last if $final->[0] ne SPF_Fail;
+
+		# Fail: lookup explain
+		$final->[3] = $EXPLAIN_DEFAULT if ! defined $final->[3];
+
+		if ( my $exp = delete $self->{explain} ) {
+			if (ref $exp) {
+				# TODO
+				# before enabling this make sure that it works (e.g. create test)
+				# SPF test suite doesn't have case of exp=..%{p}..
+				if ( 0 and ( my @xrv = $self->_resolve_macro_p($exp))) {
+					# we need to do more DNS lookups for resolving %{p} macros
+					DEBUG( "need to resolve %{p} in $exp->{macro}" );
+					$self->{explain} = $exp;
+					return @xrv;
 				}
-				if ( my @err = _check_domain( $exp, "explain:$exp" )) {
-					# bad domain: return instead original error message
-					return @rv;
-				}
-				DEBUG( "lookup TXT for '$exp' for explain" );
-				$self->{cb} = [ \&_got_TXT_exp, [ @rv ] ];
-				@rv =( Net::DNS::Packet->new( $exp,'TXT','IN' ));
-				$need_explanation = 1;
-				redo;
-			} else {
-				$rv[2]{_explain} = $EXPLAIN_DEFAULT;
+				$exp = $exp->{expanded};
 			}
+			if ( my @err = _check_domain( $exp, "explain:$exp" )) {
+				# bad domain: return unmodified final
+				return @$final;
+			}
+			DEBUG( "lookup TXT for '$exp' for explain" );
+			$self->{cb} = [ \&_got_TXT_exp ];
+			@rv =( Net::DNS::Packet->new( $exp,'TXT','IN' ));
+			redo;
 		}
 
-		DEBUG( "final response $rv[0]" );
-		last;
+		return @$final;
 	}
 
 	return @rv;
@@ -1351,56 +1385,66 @@ sub _mech_include {
 # create explain message from TXT record
 ############################################################################
 sub _got_TXT_exp {
-	my ($self,$dnsresp,$oldrv) = @_;
-	my @rv = @$oldrv;
+	my ($self,$dnsresp) = @_;
+	my $final = $self->{result};
 
 	if ( ! ref $dnsresp ) {
 		# error: timeout..
-		# just return the old rv
-		DEBUG( "error $dnsresp for exp TXT lookup -- @rv" );
+		# just return the final rv
+		DEBUG( "error $dnsresp for exp TXT lookup" );
+		return @$final;
+	}
 
-	} elsif ( $dnsresp->header->rcode eq 'NOERROR' ) {
-		my $txtdata;
-		for my $rr ($dnsresp->answer) {
-			my $rrtype = $rr->type;
-			if ( $rrtype eq 'TXT' ) {
-				length( my $t = $rr->txtdata ) or next;
-				if ( defined $txtdata ) {
-					# only one record should be returned
-					$txtdata = undef;
-					DEBUG( "got more than one TXT -> error" );
-					last;
-				} else {
-					$txtdata = $t;
-					DEBUG( "got TXT $txtdata" );
-				}
-			}
-		}
+	if ( $dnsresp->header->rcode ne 'NOERROR' ) {
+		DEBUG( "DNS error for exp TXT lookup" );
+		return @$final;
+	}
 
-		# valid TXT record found -> expand macros
-		if ( $txtdata ) {
-			my $t = eval { $self->_macro_expand( $txtdata,'exp' ) };
-			if ($@) {
-				DEBUG( "macro expansion of '$txtdata' failed: $@" );
+	my $txtdata;
+	for my $rr ($dnsresp->answer) {
+		my $rrtype = $rr->type;
+		if ( $rrtype eq 'TXT' ) {
+			length( my $t = $rr->txtdata ) or next;
+			if ( defined $txtdata ) {
+				# only one record should be returned
+				$txtdata = undef;
+				DEBUG( "got more than one TXT -> error" );
+				return @$final;
 			} else {
-				# TODO
-				# we don't compute any expansion for %{p} here. If there
-				# is a %{p} not resolved here we replace it with 'unknown'
-				$t = $t->{expanded} if ref($t);
-				# result should be limited to US-ASCII!
-				# further limit to printable chars
-				if ( $t !~m{[\x00-\x1f\x7e-\xff]} ) {
-					$rv[2]{_explain} = $t;
-					return @rv
-				}
+				$txtdata = $t;
+				DEBUG( "got TXT $txtdata" );
 			}
 		}
 	}
 
-	# set explain on error to default value
-	$rv[2]{_explain} = $EXPLAIN_DEFAULT;
-	#die $rv[2]{_explain};
-	return @rv;
+	if ( ! $txtdata ) {
+		DEBUG( "no text in TXT for explain" );
+		return @$final;
+	}
+
+	# valid TXT record found -> expand macros
+	my $exp = eval { $self->_macro_expand( $txtdata,'exp' ) };
+	if ($@) {
+		DEBUG( "macro expansion of '$txtdata' failed: $@" );
+		return @$final;
+	}
+
+	# explain
+	if (ref $exp) {
+		if ( my @xrv = $self->_resolve_macro_p($exp)) {
+			# we need to do more DNS lookups for resolving %{p} macros
+			DEBUG( "need to resolve %{p} in $exp->{macro}" );
+			$final->[4] = $exp;
+			return @xrv;
+		}
+		$exp = $exp->{expanded};
+	}
+
+	# result should be limited to US-ASCII!
+	# further limit to printable chars
+	$final->[3] = $exp if $exp !~m{[\x00-\x1f\x7e-\xff]};
+
+	return @$final;
 }
 
 ############################################################################
@@ -1469,6 +1513,8 @@ sub _macro_expand {
 							# any other domain pointing to IP
 							$xd[0]
 						}
+					} else {
+						'unknown'
 					}
 				} :
 				die "unknown macro $macro\n";

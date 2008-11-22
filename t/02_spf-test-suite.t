@@ -62,12 +62,6 @@ for my $use_additionals ('with additionals','') {
 				next;
 			}
 
-			if ( $tname =~m{^p-macro-ip[46]-valid$} ) {
-				# FIXME: we cannot do %{p} expansion in macros
-				print "ok # skip TODO %{p} expansion in macros\n";
-				next;
-			}
-
 			# capture debug output of failed cases
 			my $debug = '';
 			eval {
@@ -105,25 +99,25 @@ for my $use_additionals ('with additionals','') {
 			if ( ref($@) ne 'SPFResult' ) {
 				print "not ok # $comment - error\n";
 				( my $t = $@."\n".$debug ) =~s{^}{| }mg;
-				print $t;
+				print Dumper($tdata),$t;
 				next;
 			}
 
-			my ($status,$info,$hash) = @{$@};
+			my ($status,$info,$hash,$explain) = @{$@};
 			if ( ! grep { $status eq $_ } @$result ) {
 				print "not ok # $comment - got $status\n";
 				$debug =~s{^}{| }mg;
-				print $debug;
+				print Dumper($tdata),$debug;
 				next;
 			}
 
 			if ( $explanation ) {
 				$explanation = $Mail::SPF::Iterator::EXPLAIN_DEFAULT 
 					if $explanation eq 'DEFAULT';
-				if ( $hash->{_explain} ne $explanation ) {
-					print "not ok # $comment - exp should be '$explanation' was '$hash->{_explain}'\n";
+				if ( $explain ne $explanation ) {
+					print "not ok # $comment - exp should be '$explanation' was '$explain'\n";
 					$debug =~s{^}{| }mg;
-					print $debug;
+					print Dumper($tdata),$debug;
 					next;
 				}
 			}
@@ -135,7 +129,7 @@ for my $use_additionals ('with additionals','') {
 				} else {
 					print "not ok # $comment - got $status\n";
 					$debug =~s{^}{| }mg;
-					print $debug;
+					print Dumper($tdata),$debug;
 				}
 				next;
 			}
