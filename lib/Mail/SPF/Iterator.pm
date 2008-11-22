@@ -163,7 +163,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = 0.07;
+our $VERSION = 0.08;
 our $DEBUG=0;
 our $EXPLAIN_DEFAULT = "SPF Check Failed";
 
@@ -740,17 +740,31 @@ sub _got_txt_spf {
 		# so I think we can ignore the requirement 4.5.2 and just take the
 		# first record which is valid SPF
 
-		my (@spfdata,$rrtype);
+		my (@spfdata,@senderid);
 		if ( $qtype eq 'TXT' or $qtype eq 'SPF' ) {
 			for my $rr ($dnsresp->answer) {
-				$rrtype = $rr->type;
-				$rrtype eq 'TXT' or $rrtype eq 'SPF' or next;
+				$rr->type eq $qtype or next;
 				my $txtdata = join( '', $rr->char_str_list );
-				$txtdata =~m{^v=spf1(?:$| \s*)(.*)}i or next;
-				push @spfdata,$1;
-				DEBUG( "got spf data for $qtype: $txtdata" );
+				$txtdata =~m{^
+					(?:
+						(v=spf1)
+						| spf2\.0/(?:mfrom(?:,pra)?|pra,mfrom)
+					)
+					(?:$|\040\s*)(.*)
+				}xi or next;
+				if ( $1 ) {
+					push @spfdata,$2;
+					DEBUG( "got spf data for $qtype: $txtdata" );
+				} else {
+					push @senderid,$2;
+					DEBUG( "got senderid data for $qtype: $txtdata" );
+				}
 			}
 		}
+
+		# if SenderID and SPF are given prefer SPF, else use any
+		@spfdata = @senderid if ! @spfdata;
+
 		@spfdata or last; # no usable SPF reply
 		if (@spfdata>1) {
 			return ( SPF_PermError,
