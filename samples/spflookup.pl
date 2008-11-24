@@ -15,8 +15,10 @@ my ($ip,$sender,$helo,$local) = @ARGV;
 
 #### SPF lookup
 my $spf = Mail::SPF::Iterator->new( $ip,$sender,$helo || '',$local );
-my @rv = $spf->lookup_blocking;
-print $spf->mailheader( @rv ),"\n";
+my $result = $spf->lookup_blocking;
+print "Received-SPF: ".$spf->mailheader."\n";
+print "Explanation: ".($spf->result)[3]."\n" if $result eq SPF_Fail;
+
 
 #### USAGE
 sub usage { die <<USAGE; }

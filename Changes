@@ -1,4 +1,10 @@
-0.08 2008-11-24
+0.10 2008-11-24
+- license clarification for SPF test suite in COPYRIGHT and add
+  t/rfc4408-tests.LICENSE to distribution
+- documentation update
+- samples/spflookup shows explanation on Fail
+
+0.09 2008-11-24
 - internal restructuring, better checking that DNS answers match
   the question
 - expansion of %{p} in exp= modifier

@@ -40,11 +40,12 @@ Mail::SPF::Iterator - iterative SPF lookup
 	### ($result,@ans) = $spf->lookup_blocking( undef,$resolver );
 
 	### print mailheader
-	print $spf->mailheader;
+	print "Received-SPF: ".$spf->mailheader;
 
 	# $result = Fail|Pass|...
 	# $ans[0] = comment for Received-SPF
-	# $ans[1] = %hash for Received-SPF
+	# $ans[1] = %hash with infos for Received-SPF
+	# $ans[2] = explanation in case of Fail
 
 
 
@@ -163,7 +164,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = 0.09;
+our $VERSION = 0.10;
 our $DEBUG=0;
 our $EXPLAIN_DEFAULT = "SPF Check Failed";
 
@@ -317,7 +318,7 @@ sub result {
 sub lookup_blocking {
 	my ($self,$timeout,$resolver) = @_;
 
-	my $expire = time() + ( $timeout || 20 );
+	my $expire = time() + ( $timeout || 20 ); # 20s: RFC4408, 10.1
 	$resolver ||= Net::DNS::Resolver->new;
 
 	my ($status,@ans) = $self->next; # get initial queries
@@ -345,9 +346,10 @@ sub lookup_blocking {
 			last if $status or @ans;
 		}
 	}
-	return ( SPF_TempError,'', { problem => 'DNS lookups timed out' } )
-		if ! $status;
-	return ($status,@ans);
+	my @rv = ! $status 
+		? ( SPF_TempError,'', { problem => 'DNS lookups timed out' } )
+		: ($status,@ans);
+	return wantarray ? @rv : $status;
 }
 
 ############################################################################
@@ -841,8 +843,8 @@ sub _got_txt_spf {
 	}
 
 	# If this is the first response, wait for the other
+	DEBUG( "no records for $qtype ($rcode)" );
 	if ( grep { ! $_->{done} } @{ $self->{cbq}} ) {
-		DEBUG( "no records for $qtype ($rcode)" );
 		return (SPF_Noop);
 	}
 
