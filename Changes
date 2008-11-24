@@ -1,3 +1,9 @@
+0.08 2008-11-24
+- internal restructuring, better checking that DNS answers match
+  the question
+- expansion of %{p} in exp= modifier
+- more tests outside of official SPF test suite
+
 0.08 2008-11-22
 - accepts also SenderID records (only spf2.0/mfrom or 
   spf2.0/pra,mfrom or spf2.0/mfrom,pra) and handle them like 

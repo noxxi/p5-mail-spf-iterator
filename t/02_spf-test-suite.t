@@ -2,22 +2,27 @@
 use strict;
 use warnings;
 
-my $Tests;
+my @Tests;
 my $can_ip6;
 BEGIN {
-	my $tfile = 'rfc4408-tests.pl';
-	for (  $tfile,"t/$tfile" ) {
-		-f or next;
-		$Tests = do $_;
-		die $@ if $@;
-		last;
-	}
-	if ( ! $Tests or !@$Tests ) {
-		print "1..1\nok # skip Perl file for test suite not found\n";
-		exit;
+	my @tfile = @ARGV;
+	@tfile = ( 'rfc4408-tests.pl','misc.pl' ) if !@tfile;
+	for my $tfile (@tfile) {
+		my $tests;
+		for ( $tfile,"t/$tfile" ) {
+			-f or next;
+			$tests = do $_;
+			die $@ if $@;
+			last;
+		}
+		if ( ! $tests or !@$tests ) {
+			print "1..1\nok # skip Perl file for test suite not found\n";
+			exit;
+		}
+		push @Tests,@$tests;
 	}
 	my $sum = 0;
-	$sum += 2*keys(%{ $_->{tests} }) for (@$Tests);
+	$sum += 2*keys(%{ $_->{tests} }) for (@Tests);
 	print "1..$sum\n";
 
 	$can_ip6 = eval 'use Socket6;1';
@@ -33,14 +38,14 @@ my $DEBUG=1;
 $Mail::SPF::Iterator::DEBUG = $DEBUG;
 
 for my $use_additionals ('with additionals','') {
-	for my $test ( @$Tests ) {
+	for my $test ( @Tests ) {
 		my $desc= $test->{description};
 		my $dns_setup = $test->{zonedata};
 		my $subtests = $test->{tests};
 
-		my $resolver = myResolver->new( 
-			records => $dns_setup, 
-			use_additionals => $use_additionals 
+		my $resolver = myResolver->new(
+			records => $dns_setup,
+			use_additionals => $use_additionals
 		);
 		for my $tname (sort keys %$subtests) {
 			my $tdata = $subtests->{$tname};
@@ -85,8 +90,8 @@ for my $use_additionals ('with additionals','') {
 					for my $q (@query) {
 						#DEBUG( "next query >>> ".($q->question)[0]->string );
 						my $answer = $resolver->send( $q );
-						($status,@ans) = $spf->next( $cbid,$answer 
-							? $answer 
+						($status,@ans) = $spf->next( $cbid,$answer
+							? $answer
 							: [ $q, $resolver->errorstring ]
 						);
 						DEBUG( "status=$status" ) if $status;
@@ -107,12 +112,13 @@ for my $use_additionals ('with additionals','') {
 			if ( ! grep { $status eq $_ } @$result ) {
 				print "not ok # $comment - got $status\n";
 				$debug =~s{^}{| }mg;
-				print Dumper($tdata),$debug;
+				print Dumper($tdata),$debug.
+					Dumper({ info => $info, hash => $hash, explain => $explain });
 				next;
 			}
 
 			if ( $explanation ) {
-				$explanation = $Mail::SPF::Iterator::EXPLAIN_DEFAULT 
+				$explanation = $Mail::SPF::Iterator::EXPLAIN_DEFAULT
 					if $explanation eq 'DEFAULT';
 				if ( $explain ne $explanation ) {
 					print "not ok # $comment - exp should be '$explanation' was '$explain'\n";
@@ -129,7 +135,8 @@ for my $use_additionals ('with additionals','') {
 				} else {
 					print "not ok # $comment - got $status\n";
 					$debug =~s{^}{| }mg;
-					print Dumper($tdata),$debug;
+					print Dumper($tdata),$debug.
+						Dumper({ info => $info, hash => $hash, explain => $explain });
 				}
 				next;
 			}
@@ -185,11 +192,19 @@ sub send {
 
 	DEBUG( "got query=".$q->string );
 
-	( my $key = $qname) =~s{\.$}{};
-	if ( my @match = grep { lc($key) eq lc($_) } keys %{ $self->{records}} ) {
+	# create answer packet
+	my $packet = Net::DNS::Packet->new($qname, $qtype, $qclass);
+	$packet->header->qr(1);
+	$packet->header->aa(1);
+
+	my (%ans,$timeout,@answer,@cname);
+	while (1) {
+		( my $key = $qname) =~s{\.$}{};
+		my @match = grep { lc($key) eq lc($_) } keys %{ $self->{records}}
+			or last;
+
 		my $rrdata = $self->{records}{$match[0]};
 
-		my (%ans,$timeout);
 		for my $data (@$rrdata) {
 			if ( $data eq 'TIMEOUT' ) {
 				# report as error
@@ -202,43 +217,41 @@ sub send {
 			}
 		}
 
+
 		$ans{TXT} ||= $ans{SPF};
 		for (values %ans) {
 			$_ = undef if $_ and @$_ == 1 and $_->[0] eq 'NONE';
 		}
-		my @answer = @{ $ans{$qtype} || []};
 
-		if ( $timeout && ! @answer ) {
+		if ( my $ans = $ans{$qtype} ) {
+			push @answer, @$ans;
+		} elsif ( !@answer and ( $ans = $ans{CNAME})) {
+			@$ans == 1 or die;
+			$qname = $ans->[0];
+			push @cname, [ $match[0],$qname ];
+			redo;
+		}
+
+		if ( $timeout and !@answer and !@cname) {
 			$self->errorstring('TIMEOUT');
 			return undef;
 		}
 
 		my @additional;
-		for my $ans (@answer) {	
+		for my $ans (@answer) {
 			my %rr = ( type => $qtype, name => $qname );
+			my $aname;
 			if ( $qtype eq 'MX' ) {
-				$rr{exchange} = $ans->[1];
+				$aname = $rr{exchange} = $ans->[1];
 				$rr{preference} = $ans->[0];
-				# add A/AAAA records for MX name as additional data
-				if ( $self->{use_additionals} and (my $add = $self->{records}{$ans->[1]} )) {
-					for (@$add) {
-						next if ! ref;
-						my @k = keys %$_;
-						next if @k != 1 or ( $k[0] ne 'A' and $k[0] ne 'AAAA' );
-						push @additional, Net::DNS::RR->new( 
-							name => $ans->[1],
-							type => $k[0],
-							address => $_->{$k[0]} 
-						) or die;
-						DEBUG( "additional: ".$additional[-1]->string );
-					}
-				}
 			} elsif ( $qtype eq 'A' || $qtype eq 'AAAA' ) {
 				$rr{address} = $ans
 			} elsif ( $qtype eq 'SPF' || $qtype eq 'TXT' ) {
 				$rr{char_str_list} = ref($ans) ? $ans : [ $ans ];
 			} elsif ( $qtype eq 'PTR' ) {
 				$rr{ptrdname} = $ans;
+			} elsif ( $qtype eq 'CNAME' ) {
+				$aname = $rr{cname} = $ans;
 			} else {
 				die $qtype
 			}
@@ -246,26 +259,40 @@ sub send {
 			#DEBUG( Dumper( \%rr ));
 			$ans = Net::DNS::RR->new( %rr ) or die;
 			DEBUG( "answer: ".$ans->string );
+
+			if ( $self->{use_additionals} and $qtype eq 'MX' ) {
+				# add A/AAAA records as additional data
+				$aname =~s{\.$}{};
+				for (@{ $self->{records}{$aname} || [] }) {
+					next if ! ref;
+					my @k = keys %$_;
+					next if @k != 1 or ( $k[0] ne 'A' and $k[0] ne 'AAAA' );
+					push @additional, Net::DNS::RR->new(
+						name => $aname,
+						type => $k[0],
+						address => $_->{$k[0]}
+					) or die;
+					DEBUG( "additional: ".$additional[-1]->string );
+				}
+			}
 		}
 
-		# create answer packet
-		my $packet = Net::DNS::Packet->new($qname, $qtype, $qclass);
-		$packet->header->qr(1);
-		$packet->header->rcode('NOERROR');
-		$packet->header->aa(1);
+		for(@cname) {
+			$packet->push(answer => Net::DNS::RR->new(
+				type => 'CNAME', name => $_->[0], cname => $_->[1] ));
+		}
 		if ( @answer ) {
 			$packet->push(answer => @answer);
 			$packet->push(additional => @additional) if @additional;
 		}
+		#DEBUG( $packet->string );
+		$packet->header->rcode('NOERROR');
 		return $packet;
 	}
 
 	# report that domain does not exist
 	DEBUG( "send NXDOMAIN" );
-	my $packet = Net::DNS::Packet->new($qname, $qtype, $qclass);
-	$packet->header->qr(1);
 	$packet->header->rcode('NXDOMAIN');
-	$packet->header->aa(1);
 	return $packet;
 }
 

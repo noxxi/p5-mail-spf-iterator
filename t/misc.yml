@@ -1,0 +1,37 @@
+---
+description: various other tests
+tests:
+  spf-by-cname:
+    description: >-
+      TXT/SPF records can be referenced through CNAME
+    comment: >-
+      The SPF Lookup returns a CNAME and the SPF record
+    spec: ""
+    helo: mail.example.net
+    host: 1.2.3.5
+    mailfrom: user@example.net
+    result: pass
+  p-in-exp-mod:
+    description: >-
+      %{p} in exp= modifier
+    spec: ""
+    helo: mail.example.net
+    host: 1.2.3.5
+    mailfrom: user@example1.net
+    explanation: forbidden for one.two.three.five.example.net
+    result: fail
+zonedata:
+  example.net:
+    - CNAME: example.com
+  example.com:
+    - SPF:  v=spf1 ip4:1.2.3.5 -all
+  example1.net:
+    - SPF:  v=spf1 -ip4:1.2.3.5 all exp=%{p4r}.explain.example1.net
+  5.3.2.1.in-addr.arpa:
+    - PTR: one.two.three.five.example.net
+  one.two.three.five.example.net:
+    - A: 1.2.3.5
+  five.three.two.one.explain.example1.net:
+    - TXT: forbidden for %{p}
+  unknown.explain.example1.net:
+    - TXT: bad message for %{p}

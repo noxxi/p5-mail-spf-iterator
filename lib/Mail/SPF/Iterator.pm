@@ -163,7 +163,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = 0.08;
+our $VERSION = 0.09;
 our $DEBUG=0;
 our $EXPLAIN_DEFAULT = "SPF Check Failed";
 
@@ -480,8 +480,64 @@ sub next {
 			}
 		}
 
-		my ($sub,@arg) = @$cb;
-		@rv = $sub->($self,$dnsresp,@arg);
+		my ($sub,@arg) = @$cb; # Callback
+
+		# check if answer matches query
+		my $rcode = $dnsresp->header->rcode;
+		if ( $rcode ne 'NOERROR' ) {
+			# call callback with no records
+			@rv = $sub->($self,$qtype,$rcode,[],[],@arg);
+
+		} else {
+			# extract answer and additional data
+			# verify names and types in answer records
+			# and handle CNAMEs
+			my $qname = $q->qname;
+			my (%cname,%ans);
+			for my $rr ($dnsresp->answer) {
+				my $rtype = $rr->type;
+				if ( $rtype eq 'CNAME' ) {
+					if ( exists $cname{$rr->name} ) {
+						DEBUG( "more than one CNAME for same name" );
+						next; # XXX should we TempError instead of ignoring?
+					}
+					$cname{$rr->name} = $rr->cname;
+				} elsif ( $rtype eq $qtype ) {
+					push @{ $ans{$rr->name}},$rr;
+				} else {
+					# XXXX should we TempError instead of ignoring?
+					DEBUG( "unexpected answer record for $qtype:$qname" );
+				}
+			}
+
+			# find all valid names, usually there should be at most one CNAME
+			my @names = ($qname);
+			while ( %cname ) {
+				push @names, delete @cname{@names} or last;
+			}
+			if ( %cname ) {
+				# Report but ignore - XXX should we TempError instead?
+				DEBUG( "unrelated CNAME records ".Dumper(\%cname));
+			}
+
+			# collect the RR for all valid names
+			my @ans;
+			for (@names) {
+				my $rrs = delete $ans{$_} or next;
+				push @ans,@$rrs;
+			}
+
+			if ( ! @ans and @names>1 ) {
+				# according to RFC1034 all RR for the type should be put into
+				# the answer section together with the CNAMEs
+				# so if there are no RRs in this answer, we should assume, that
+				# there are no RRs at all
+				DEBUG( "no answer records for $qtype, but names @names" );
+			}
+
+			@rv = $sub->($self,$qtype,$rcode,\@ans,[ $dnsresp->additional ],@arg);
+		}
+
 
 	} else {
 		# no callback yet - must be initial
@@ -494,18 +550,16 @@ sub next {
 
 		#DEBUG( "loop rv=".Data::Dumper->new([\@rv])->Maxdepth(1)->Dump );
 
+		if ( $self->{result} && ! @rv ) {
+			# resolving of %{p} in exp= mod or explain TXT results in @rv = ()
+			# set to final result
+			@rv = @{ $self->{result}};
+		}
+
+
 		##### ignored, try to find next action
 		if ( ! @rv ) {
 			#DEBUG( "ignored" );
-
-			if ( my $exp = ( $self->{result} && delete $self->{result}[4] )) {
-				# we had a %{p} to resolve in the TXT we got for explain, see _got_TXT_exp
-				# should be expanded now
-				$self->{result}[3] = $exp->{expanded};
-
-				# This was the last action needed
-				return @{ $self->{result}};
-			}
 
 			my $next = shift @{$self->{mech}};
 			if ( ! $next ) {
@@ -556,6 +610,7 @@ sub next {
 			my ($sub,@arg) = @$next;
 			@rv = $sub->($self,@arg);
 			redo;
+
 		}
 
 		##### list of DNS packets ? -> return as (undef,cbid,@pkts)
@@ -608,14 +663,12 @@ sub next {
 
 		if ( my $exp = delete $self->{explain} ) {
 			if (ref $exp) {
-				# TODO
-				# before enabling this make sure that it works (e.g. create test)
-				# SPF test suite doesn't have case of exp=..%{p}..
-				if ( 0 and ( my @xrv = $self->_resolve_macro_p($exp))) {
+				if ( my @xrv = $self->_resolve_macro_p($exp)) {
 					# we need to do more DNS lookups for resolving %{p} macros
 					DEBUG( "need to resolve %{p} in $exp->{macro}" );
 					$self->{explain} = $exp;
-					return @xrv;
+					@rv = @xrv;
+					redo;
 				}
 				$exp = $exp->{expanded};
 			}
@@ -627,6 +680,13 @@ sub next {
 			$self->{cb} = [ \&_got_TXT_exp ];
 			@rv =( Net::DNS::Packet->new( $exp,'TXT','IN' ));
 			redo;
+
+		} elsif ( $exp = delete $final->[4] ) {
+			# we had a %{p} to resolve in the TXT we got for explain,
+			# see _got_TXT_exp -> should be expanded now
+			$final->[3] = $exp->{expanded};
+
+			# This was the last action needed
 		}
 
 		return @$final;
@@ -724,14 +784,9 @@ sub _query_txt_spf {
 # parses response and starts processing
 ############################################################################
 sub _got_txt_spf {
-	my ($self,$dnsresp) = @_;
+	my ($self,$qtype,$rcode,$ans,$add) = @_;
 
-	my ($q) = $dnsresp->question;
-	my $qtype = $q->qtype;
-
-	my $rcode = $dnsresp->header->rcode;
-	for my $dummy ( $rcode eq 'NOERROR' ? (1):() ) {
-
+	for my $dummy ( @$ans ? (1):() ) {
 		# RFC4408 says in 4.5:
 		# 2. If any records of type SPF are in the set, then all records of
 		#    type TXT are discarded.
@@ -741,24 +796,21 @@ sub _got_txt_spf {
 		# first record which is valid SPF
 
 		my (@spfdata,@senderid);
-		if ( $qtype eq 'TXT' or $qtype eq 'SPF' ) {
-			for my $rr ($dnsresp->answer) {
-				$rr->type eq $qtype or next;
-				my $txtdata = join( '', $rr->char_str_list );
-				$txtdata =~m{^
-					(?:
-						(v=spf1)
-						| spf2\.0/(?:mfrom(?:,pra)?|pra,mfrom)
-					)
-					(?:$|\040\s*)(.*)
-				}xi or next;
-				if ( $1 ) {
-					push @spfdata,$2;
-					DEBUG( "got spf data for $qtype: $txtdata" );
-				} else {
-					push @senderid,$2;
-					DEBUG( "got senderid data for $qtype: $txtdata" );
-				}
+		for my $rr (@$ans) {
+			my $txtdata = join( '', $rr->char_str_list );
+			$txtdata =~m{^
+				(?:
+					(v=spf1)
+					| spf2\.0/(?:mfrom(?:,pra)?|pra,mfrom)
+				)
+				(?:$|\040\s*)(.*)
+			}xi or next;
+			if ( $1 ) {
+				push @spfdata,$2;
+				DEBUG( "got spf data for $qtype: $txtdata" );
+			} else {
+				push @senderid,$2;
+				DEBUG( "got senderid data for $qtype: $txtdata" );
 			}
 		}
 
@@ -788,7 +840,6 @@ sub _got_txt_spf {
 		return;
 	}
 
-	# FAILED:
 	# If this is the first response, wait for the other
 	if ( grep { ! $_->{done} } @{ $self->{cbq}} ) {
 		DEBUG( "no records for $qtype ($rcode)" );
@@ -984,8 +1035,7 @@ sub _mech_ip6 {
 ############################################################################
 # handle mechanism 'a'
 # check if one of the A/AAAA records for $domain resolves to
-# clientip/plen, either directly or via CNAME resolving, in which case
-# we expect the resolved CNAME to be in the hints of the response
+# clientip/plen,
 ############################################################################
 sub _mech_a {
 	my ($self,$qual,$domain,$plen) = @_;
@@ -1003,7 +1053,7 @@ sub _mech_a {
 		if --$self->{limit_dns_mech} < 0;
 
 	my $typ = $self->{clientip4} ? 'A':'AAAA';
-	$self->{cb} = [ \&_got_A, $qual,$typ,$plen,[ [$domain,0] ],'a' ];
+	$self->{cb} = [ \&_got_A, $qual,$plen,[ $domain ],'a' ];
 	return scalar(Net::DNS::Packet->new( $domain, $typ,'IN' ));
 }
 
@@ -1013,46 +1063,22 @@ sub _mech_a {
 # in the case of MX $names might contain more than one name to resolve, it
 # will try to resolve names to addresses and to match them until @$names
 # is empty
-# will also resolve CNAME if address is not inside additional data
 ############################################################################
 sub _got_A {
-	my ($self,$dnsresp,$qual,$typ,$plen,$names,$mech) = @_;
-	my ($domain,$depth) = @{ shift(@$names) };
+	my ($self,$qtype,$rcode,$ans,$add,$qual,$plen,$names,$mech) = @_;
+	my $domain = shift(@$names);
 
-	my $rcode = $dnsresp->header->rcode;
-	DEBUG( "got response to $typ for $domain: $rcode" );
+	DEBUG( "got response to $qtype for $domain: $rcode" );
 	if ( $rcode eq 'NXDOMAIN' ) {
 		# no records found
 	} elsif ( $rcode ne 'NOERROR' ) {
 		return ( SPF_TempError,
-			"getting $typ for $domain",
+			"getting $qtype for $domain",
 			{ problem => "error resolving $domain" }
 		);
 	}
 
-	my (%cname,@addr);
-	# check first in the answer
-	for my $rr ($dnsresp->answer) {
-		my $rrtype = $rr->type;
-		if ( $rrtype eq 'CNAME' ) {
-			$cname{ $rr->cname } = 0;
-		} elsif ( $rrtype eq $typ ) {
-			push @addr, $rr->address;
-		}
-	}
-
-	# and the in the additional section
-	for my $rr ($dnsresp->additional) {
-		if ( $rr->type eq $typ && $cname{$rr->name} ) {
-			push @addr, $rr->address;
-			$cname{$rr->name}++;
-		}
-	}
-
-	# add unresolved CNAMEs
-	push @$names, map { $cname{$_} ? (): ([ $_, $depth+1 ]) } keys %cname;
-	{ my %h; @$names = grep { ! $h{$_}++ } @$names; } # uniq
-
+	my @addr = map { $_->address } @$ans;
 	return _check_A_match($self,$qual,$domain,$plen,\@addr,$names,$mech);
 }
 
@@ -1096,15 +1122,10 @@ sub _check_A_match {
 	}
 
 	# no match yet, can we resolve another name?
-	while ( @$names ) {
-		if ( $names->[0][1]>2 ) {
-			# recursion of CNAMEs to deep, skip this name
-			shift @$names;
-			next;
-		}
+	if ( @$names ) {
 		my $typ = $self->{clientip4} ? 'A':'AAAA';
-		$self->{cb} = [ \&_got_A, $qual,$typ,$plen,$names,$mech ];
-		return scalar(Net::DNS::Packet->new( $names->[0][0], $typ,'IN' ));
+		$self->{cb} = [ \&_got_A, $qual,$plen,$names,$mech ];
+		return scalar(Net::DNS::Packet->new( $names->[0], $typ,'IN' ));
 	}
 
 	# finally no match
@@ -1135,43 +1156,43 @@ sub _mech_mx {
 }
 
 sub _got_MX {
-	my ($self,$dnsresp,$qual,$domain,$plen) = @_;
+	my ($self,$qtype,$rcode,$ans,$add,$qual,$domain,$plen) = @_;
 
-	if ( $dnsresp->header->rcode eq 'NXDOMAIN' ) {
+	if ( $rcode eq 'NXDOMAIN' ) {
 		# no records found
-	} elsif ( $dnsresp->header->rcode ne 'NOERROR' ) {
+	} elsif ( $rcode ne 'NOERROR' ) {
 		return ( SPF_TempError,
 			"getting MX form $domain",
 			{ problem => "error resolving $domain" }
 		);
+	} elsif ( ! @$ans ) {
+		return; # domain has no MX -> no match
 	}
 
-	my (%mx,@addr);
-	# check first in the answer
-	for my $rr ($dnsresp->answer) {
-		if ( $rr->type eq 'MX' ) {
-			$mx{ $rr->exchange } = 0;
-		}
-	}
-
-	# domain has no MX -> no match
-	return if ! %mx;
+	# all MX, with best (lowest) preference first
+	my @mx = map { $_->[0] }
+		sort { $a->[1] <=> $b->[1] }
+		map { [ $_->exchange, $_->preference ] }
+		@$ans;
+	my %mx = map { $_ => 0 } @mx;
 
 	# try to find A|AAAA records in additional data
+	my (@addr,@found);
 	my $atyp = $self->{clientip4} ? 'A':'AAAA';
-	for my $rr ($dnsresp->additional) {
+	for my $rr (@$add) {
 		if ( $rr->type eq $atyp && exists $mx{$rr->name} ) {
 			push @addr, $rr->address;
-			$mx{$rr->name}++;
+			$mx{$rr->name} = 1;
 		}
 	}
-	DEBUG( "found mx for $domain: ".join( " ", keys %mx ));
+	DEBUG( "found mx for $domain: @mx" );
 
-	# remove from %mx where I've found addresses
-	delete @mx{ grep { $mx{$_} } keys %mx };
+	# remove from @mx where I've found addresses
+	# limit the Rest to 10 records (rfc4408,10.1)
+	@mx = grep { ! $mx{$_} } @mx;
+	splice(@mx,10) if @mx>10;
 
-	return _check_A_match( $self,$qual,$domain,$plen,\@addr,
-		[ map { [$_,0] } keys %mx ],'mx');
+	return _check_A_match( $self,$qual,$domain,$plen,\@addr,\@mx,'mx');
 }
 
 ############################################################################
@@ -1195,29 +1216,10 @@ sub _mech_exists {
 }
 
 sub _got_A_exists {
-	my ($self,$dnsresp,$qual,$domain) = @_;
+	my ($self,$qtype,$rcode,$ans,$add,$qual,$domain) = @_;
 
-	return if $dnsresp->header->rcode ne 'NOERROR';
-
-	my (%cname,@answer);
-	# check first in the answer
-	for my $rr ($dnsresp->answer) {
-		my $rrtype = $rr->type;
-		if ( $rrtype eq 'CNAME' ) {
-			$cname{ $rr->cname } = 1;
-		} elsif ( $rrtype eq 'A' ) {
-			push @answer, $rr->address;
-		}
-	}
-
-	# and the in the additional section
-	for my $rr ($dnsresp->additional) {
-		if ( $rr->type eq 'A' && $cname{$rr->name} ) {
-			push @answer, $rr->address;
-		}
-	}
-
-	return if ! @answer; # no A records
+	return if $rcode ne 'NOERROR'; # no match
+	return if ! @$ans; # no A records
 	return ($qual,"domain $domain exists", { mechanism => 'exists' } )
 }
 
@@ -1270,80 +1272,53 @@ sub _mech_ptr {
 }
 
 sub _got_PTR {
-	my ($self,$dnsresp,$qual,$query,$domain) = @_;
+	my ($self,$qtype,$rcode,$ans,$add,$qual,$query,$domain) = @_;
 
-	if ( $dnsresp->header->rcode ne 'NOERROR' ) {
-		# can not be validated - ignore mech
-		return;
-	}
-
-	my @names;
-	for my $rr ($dnsresp->answer) {
-		push @names, lc($rr->ptrdname) if $rr->type eq 'PTR';
-	}
-	return if ! @names; # can not be validated - ignore mech
+	# ignore mech if it can not be validated
+	return if $rcode ne 'NOERROR';
+	my @names = map { $_->ptrdname } @$ans or return;
 
 	# strip records, which do not end in $domain
 	@names = grep { $_ eq $domain || m{\.\Q$domain\E$} } @names;
 	return if ! @names; # return if no matches inside $domain
 
-	# limit to no more then 10 names!
-	@names = splice( @names,0,10 );
+	# limit to no more then 10 names (see RFC4408, 10.1)
+	splice(@names,10) if @names>10;
 
 	# validate the rest by looking up the IP and verifying it
 	# with the original IP (clientip)
 	my $typ = $self->{clientip4} ? 'A':'AAAA';
 
-	$self->{cb} = [ \&_got_A_ptr, $qual,$typ, \@names ];
+	$self->{cb} = [ \&_got_A_ptr, $qual,\@names ];
 	return scalar(Net::DNS::Packet->new( $names[0], $typ,'IN' ));
 }
 
 sub _got_A_ptr {
-	my ($self,$dnsresp,$qual,$typ,$names) = @_;
+	my ($self,$qtype,$rcode,$ans,$add,$qual,$names) = @_;
 
-	for my $dummy ( $dnsresp->header->rcode eq 'NOERROR' ? (1):() ) {
-		my (%cname,@addr);
-		# check first in the answer
-		for my $rr ($dnsresp->answer) {
-			my $rrtype = $rr->type;
-			if ( $rrtype eq 'CNAME' ) {
-				$cname{ $rr->cname } = 1;
-			} elsif ( $rrtype eq $typ ) {
-				push @addr, $rr->address;
-			}
-		}
-
-		# and the in the additional section
-		for my $rr ($dnsresp->additional) {
-			if ( $rr->type eq $typ && $cname{$rr->name} ) {
-				push @addr, $rr->address;
-			}
-		}
-
-		if ( ! @addr ) {
-			# no addr for domain? - try next
-			last;
-		}
+	for my $dummy ( $rcode eq 'NOERROR' ? (1):() ) {
+		@$ans or last; # no addr for domain? - try next
+		my @addr = map { $_->address } @$ans;
 
 		# check if @addr contains clientip
-		my $match;
-		if ( $self->{clientip4} ) {
+		my ($match,$ip);
+		if ( $ip = $self->{clientip4} ) {
 			for(@addr) {
 				m{^[\d\.]+$} or next;
-				eval { inet_aton($_) } eq $self->{clientip4} or next;
+				eval { inet_aton($_) } eq $ip or next;
 				$match = 1;
 				last;
 			}
 		} else {
+			$ip = $self->{clientip6};
 			for(@addr) {
-				eval { inet_pton(AF_INET6,$_) } eq $self->{clientip6} or next;
+				eval { inet_pton(AF_INET6,$_) } eq $ip or next;
 				$match = 1;
 				last;
 			}
 		}
 
 		# cache verification status
-		my $ip = $self->{clientip4} || $self->{clientip6};
 		$self->{validated}{$ip}{$names->[0]} = $match;
 
 		# return $qual if we have verified the ptr
@@ -1357,7 +1332,7 @@ sub _got_A_ptr {
 	@$names or return; # no next
 
 	# cb stays the same
-	return scalar(Net::DNS::Packet->new( $names->[0], $typ,'IN' ));
+	return scalar(Net::DNS::Packet->new( $names->[0], $qtype,'IN' ));
 }
 
 
@@ -1399,42 +1374,26 @@ sub _mech_include {
 # create explain message from TXT record
 ############################################################################
 sub _got_TXT_exp {
-	my ($self,$dnsresp) = @_;
+	my ($self,$qtype,$rcode,$ans,$add) = @_;
 	my $final = $self->{result};
 
-	if ( ! ref $dnsresp ) {
-		# error: timeout..
-		# just return the final rv
-		DEBUG( "error $dnsresp for exp TXT lookup" );
-		return @$final;
-	}
-
-	if ( $dnsresp->header->rcode ne 'NOERROR' ) {
+	if ( $rcode ne 'NOERROR' ) {
 		DEBUG( "DNS error for exp TXT lookup" );
+		# just return the final rv
 		return @$final;
 	}
 
-	my $txtdata;
-	for my $rr ($dnsresp->answer) {
-		my $rrtype = $rr->type;
-		if ( $rrtype eq 'TXT' ) {
-			length( my $t = $rr->txtdata ) or next;
-			if ( defined $txtdata ) {
-				# only one record should be returned
-				$txtdata = undef;
-				DEBUG( "got more than one TXT -> error" );
-				return @$final;
-			} else {
-				$txtdata = $t;
-				DEBUG( "got TXT $txtdata" );
-			}
-		}
-	}
-
-	if ( ! $txtdata ) {
+	my ($txtdata,$t2) = grep { length } map { $_->txtdata } @$ans;;
+	if ( $t2 ) {
+		# only one record should be returned
+		DEBUG( "got more than one TXT -> error" );
+		return @$final;
+	} elsif ( ! $txtdata ) {
 		DEBUG( "no text in TXT for explain" );
 		return @$final;
 	}
+
+	DEBUG( "got TXT $txtdata" );
 
 	# valid TXT record found -> expand macros
 	my $exp = eval { $self->_macro_expand( $txtdata,'exp' ) };
@@ -1538,7 +1497,7 @@ sub _macro_expand {
 			@parts = reverse @parts if $macro_r;
 			if ( length $macro_n ) {
 				die "bad macro definition '$domain'\n" if ! $macro_n; # must be != 0
-				@parts = splice( @parts,-$macro_n );
+				@parts = splice( @parts,-$macro_n ) if @parts>$macro_n;
 			}
 			if ( $imacro ne $macro ) {
 				# upper case - URI escape
@@ -1595,15 +1554,12 @@ sub _resolve_macro_p {
 }
 
 sub _validate_got_PTR {
-	my ($self,$dnsresp,$rec ) = @_;
+	my ($self,$qtype,$rcode,$ans,$add,$rec ) = @_;
 
-	return if $dnsresp->header->rcode ne 'NOERROR';
+	# no validation possible if no records
+	return if $rcode ne 'NOERROR' or ! @$ans;
 
-	my @names;
-	for my $rr ($dnsresp->answer) {
-		push @names, lc($rr->ptrdname) if $rr->type eq 'PTR';
-	}
-	@names or return; # no records
+	my @names = map { lc($_->ptrdname) } @$ans;
 
 	# prefer records, which are $domain or end in $domain
 	if ( my $domain = $rec->{domain} ) {
@@ -1612,8 +1568,8 @@ sub _validate_got_PTR {
 		{ my %n; @names = grep { !$n{$_}++ } @names } # uniq
 	}
 
-	# limit to no more then 10 names!
-	@names = splice( @names,0,10 );
+	# limit to no more then 10 names (RFC4408, 10.1)
+	splice(@names,10) if @names>10;
 
 	# validate the rest by looking up the IP and verifying it
 	# with the original IP (clientip)
@@ -1624,33 +1580,14 @@ sub _validate_got_PTR {
 }
 
 sub _validate_got_A_ptr {
-	my ($self,$dnsresp,$rec,$names) = @_;
+	my ($self,$qtype,$rcode,$ans,$add,$rec,$names) = @_;
 
-	my $typ = length($rec->{ip}) == 4 ? 'A':'AAAA';
-	if ( $dnsresp->header->rcode eq 'NOERROR' ) {
-		my (%cname,@addr);
-		# check first in the answer
-		for my $rr ($dnsresp->answer) {
-			my $rrtype = $rr->type;
-			if ( $rrtype eq 'CNAME' ) {
-				$cname{ $rr->cname } = 1;
-			} elsif ( $rrtype eq $typ ) {
-				push @addr, $rr->address;
-			}
-		}
-
-		# and the in the additional section
-		for my $rr ($dnsresp->additional) {
-			if ( $rr->type eq $typ && $cname{$rr->name} ) {
-				push @addr, $rr->address;
-			}
-		}
-
-		if ( ! @addr ) {
-			# no addr for domain? - ignore - maybe
+	if ( $rcode eq 'NOERROR' ) {
+		my @addr = map { $_->address } @$ans or do {
+			# no addr for domain? -> ignore - maybe
 			# the domain only provides the other kind of records?
 			return;
-		}
+		};
 
 		# check if @addr contains clientip
 		my $match;
@@ -1687,7 +1624,7 @@ sub _validate_got_A_ptr {
 	@$names or return; # no next
 
 	# cb stays the same
-	return scalar(Net::DNS::Packet->new( $names->[0], $typ,'IN' ));
+	return scalar(Net::DNS::Packet->new( $names->[0], $qtype,'IN' ));
 }
 
 

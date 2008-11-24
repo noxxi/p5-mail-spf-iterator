@@ -9,8 +9,8 @@ use warnings;
 use Data::Dumper;
 use YAML 'LoadFile';
 
-my $src = 'rfc4408-tests.yml';
-my $dst = 'rfc4408-tests.pl';
+my $src = $ARGV[0] || 'rfc4408-tests.yml';
+my $dst = $src =~m{^(.*)\.ya?ml$}i && "$1.pl" or die;
 for (  '.','t' ) {
 	-f "$_/$src" or next;
 	my @tests = LoadFile( "$_/$src" );
