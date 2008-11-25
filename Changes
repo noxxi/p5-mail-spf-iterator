@@ -1,3 +1,8 @@
+1.01 2008-11-25
+- code cleanups
+- detect and fix bug with deeply nested includes, where a Match
+  (Pass) from a lower level gets directly propagated to the top
+
 1.00 2008-11-25
 - declare all $self as Mail::SPF::Iterator object
 - add method to get/set default explanation string
