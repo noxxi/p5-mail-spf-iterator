@@ -83,6 +83,9 @@ for my $use_additionals ('with additionals','') {
 				die "no spf: $@\n".Dumper($tdata) if ! $spf;
 				die "unhandled args :".Dumper(\%d) if %d;
 
+				$explanation = $spf->explain_default
+					if $explanation and $explanation eq 'DEFAULT';
+
 				my ($status,@ans) = $spf->next;
 				while ( ! $status ) {
 					my ($cbid,@query) = @ans;
@@ -118,8 +121,6 @@ for my $use_additionals ('with additionals','') {
 			}
 
 			if ( $explanation ) {
-				$explanation = $Mail::SPF::Iterator::EXPLAIN_DEFAULT
-					if $explanation eq 'DEFAULT';
 				if ( $explain ne $explanation ) {
 					print "not ok # $comment - exp should be '$explanation' was '$explain'\n";
 					$debug =~s{^}{| }mg;

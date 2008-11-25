@@ -116,6 +116,16 @@ If the SPF record had an explain modifier, which needed DNS lookups to resolve
 this method might return the result (although with incomplete explain) before
 C<next> does it.
 
+=item explain_default ( [ EXPLAIN ] )
+
+Sets default explanation string if EXPLAIN is given.
+If it's called as a class method the default explanation string for the class
+will be set, otherwise the default explanation string for the object.
+
+Returns the current default explanation string for the object or if non
+given or if called as a class method the default explanation string for the
+class.
+
 =item lookup_blocking ( [ TIMEOUT, RESOLVER ] )
 
 Quick way to get the SPF status.
@@ -164,13 +174,12 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = 0.10;
+our $VERSION = '1.00';
 our $DEBUG=0;
-our $EXPLAIN_DEFAULT = "SPF Check Failed";
 
 use fields qw( clientip4 clientip6 domain sender helo myname
 	include_stack cb cbq cbid validated limit_dns_mech
-	mech redirect explain result );
+	mech redirect explain result explain_default );
 
 use Net::DNS;
 use Socket;
@@ -254,10 +263,16 @@ my %qual2rv = (
 ############################################################################
 # NEW
 # creates new SPF processing object
+# Args: ($class,$ip,$mailfrom,$helo,$myname)
+#  $ip: IP4/IP6 as string
+#  $mailfrom: user@domain of "mail from"
+#  $helo: info from helo|ehlo - should be domain name
+#  $myname: local name, used only for expanding macros
+# Returns: $self
 ############################################################################
 sub new {
 	my ($class,$ip,$mailfrom,$helo,$myname) = @_;
-	my $self = fields::new($class);
+	my Mail::SPF::Iterator $self = fields::new($class);
 
 	my $domain =
 		$mailfrom =~m{\@([\w\-.]+)$} ? $1 :
@@ -303,20 +318,57 @@ sub new {
 
 ############################################################################
 # return result
+# Args: $self
+# Returns: ($status,$info,$hash,$explain)
+#  $status: SPF_Pass|SPF_Fail|...
+#  $info:   comment for Received-SPF header
+#  $hash:   param for Received-SPF header
+#  $explain: explanation string on SPF_Fail
 ############################################################################
 sub result {
-	my $self = shift;
+	my Mail::SPF::Iterator $self = shift;
 	my $r = $self->{result} or return;
 	return @$r;
+}
+
+############################################################################
+# get/set default explanation string
+# Args: ($self,[$explain])
+#  $explain: default explanation string (will be set)
+# Returns: $explain
+#  $explain: default explanation string
+############################################################################
+{
+	my $default = 'SPF Check Failed';
+	sub explain_default {
+		if ( ref $_[0] ) {
+			my Mail::SPF::Iterator $self = shift;
+			$self->{explain_default} = shift if @_;
+			return defined $self->{explain_default} 
+				? $self->{explain_default} 
+				: $default;
+		} else {
+			shift; # class
+			$default = shift if @_;
+			return $default;
+		}
+	}
 }
 
 ############################################################################
 # lookup blocking
 # not the intended way to use the module, but sometimes one needs to quickly
 # lookup something, even if it's blocking
+# Args: ($self,[$timeout,$resolver])
+#  $timeout: total timeout for lookups, default 20
+#  $resolver: Resolver object compatible to Net::DNS::Resolver, if not
+#      given a new Net::DNS::Resolver object will be created
+# Returns: ($status,$info,$hash,$explain) 
+#  see result()
 ############################################################################
 sub lookup_blocking {
-	my ($self,$timeout,$resolver) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($timeout,$resolver) = @_;
 
 	my $expire = time() + ( $timeout || 20 ); # 20s: RFC4408, 10.1
 	$resolver ||= Net::DNS::Resolver->new;
@@ -355,9 +407,11 @@ sub lookup_blocking {
 ############################################################################
 # mailheader
 # create value for Received-SPF header for final response
+# Args: $self
+# Returns: $hdrvalue
 ############################################################################
 sub mailheader {
-	my $self = shift;
+	my Mail::SPF::Iterator $self = shift;
 	my ($result,$info,$hash) = @{ $self->{result} || return };
 	my $t = "$result ";
 	my %t = (
@@ -393,7 +447,8 @@ sub mailheader {
 #           problem... for Received-SPF header
 ############################################################################
 sub next {
-	my ($self,$cbid,$dnsresp) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($cbid,$dnsresp) = @_;
 
 	my @rv;
 	if ( my $cb = $self->{cb} ) {
@@ -661,7 +716,7 @@ sub next {
 		last if $final->[0] ne SPF_Fail;
 
 		# Fail: lookup explain
-		$final->[3] = $EXPLAIN_DEFAULT if ! defined $final->[3];
+		$final->[3] = $self->explain_default if ! defined $final->[3];
 
 		if ( my $exp = delete $self->{explain} ) {
 			if (ref $exp) {
@@ -766,7 +821,7 @@ sub _check_domain {
 # returns queries for SPF and TXT record, next state is _got_txt_spf
 ############################################################################
 sub _query_txt_spf {
-	my $self = shift;
+	my Mail::SPF::Iterator $self = shift;
 	DEBUG( "want SPF/TXT for $self->{domain}" );
 	# return query for SPF and TXT, we see what we get first
 	if ( my @err = _check_domain(
@@ -786,7 +841,8 @@ sub _query_txt_spf {
 # parses response and starts processing
 ############################################################################
 sub _got_txt_spf {
-	my ($self,$qtype,$rcode,$ans,$add) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add) = @_;
 
 	for my $dummy ( @$ans ? (1):() ) {
 		# RFC4408 says in 4.5:
@@ -864,7 +920,9 @@ sub _got_txt_spf {
 # otherwise die()s with somewhat helpful error message
 ############################################################################
 sub _parse_spf {
-	my ($self,$data) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my $data = shift;
+
 	my (@mech,$redirect,$explain);
 	for ( split( ' ', $data )) {
 		my ($qual,$mech,$mod,$arg) = m{^(?:
@@ -1000,7 +1058,8 @@ sub _parse_spf {
 # matches all time
 ############################################################################
 sub _mech_all {
-	my ($self,$qual) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my $qual = shift;
 	DEBUG( "mech all with qual=$qual" );
 	return ( $qual,'matches default', { mechanism => 'all' });
 }
@@ -1010,7 +1069,8 @@ sub _mech_all {
 # matches if clients IP4 address is in ip/mask
 ############################################################################
 sub _mech_ip4 {
-	my ($self,$qual,$ip,$plen) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$ip,$plen) = @_;
 	DEBUG( "mech ip4:".inet_ntoa($ip)."/$plen with qual=$qual" );
 	defined $self->{clientip4} or return (); # ignore rule, no IP4 address
 	return ($qual,"matches ip4:".inet_ntoa($ip)."/$plen", { mechanism => 'ip4' } )
@@ -1023,7 +1083,8 @@ sub _mech_ip4 {
 # matches if clients IP6 address is in ip/mask
 ############################################################################
 sub _mech_ip6 {
-	my ($self,$qual,$ip,$plen) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$ip,$plen) = @_;
 	DEBUG( "mech ip6:".inet_ntop(AF_INET6,$ip)."/$plen with qual=$qual" );
 	defined $self->{clientip6} or return (); # ignore rule, no IP6 address
 	if ( ($self->{clientip6} & $mask6[$plen]) eq ($ip & $mask6[$plen])) {
@@ -1040,7 +1101,8 @@ sub _mech_ip6 {
 # clientip/plen,
 ############################################################################
 sub _mech_a {
-	my ($self,$qual,$domain,$plen) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$domain,$plen) = @_;
 	$domain = $domain->{expanded} if ref $domain;
 	DEBUG( "mech a:$domain/$plen with qual=$qual" );
 	if ( my @err = _check_domain($domain, "a:$domain/$plen")) {
@@ -1067,7 +1129,8 @@ sub _mech_a {
 # is empty
 ############################################################################
 sub _got_A {
-	my ($self,$qtype,$rcode,$ans,$add,$qual,$plen,$names,$mech) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add,$qual,$plen,$names,$mech) = @_;
 	my $domain = shift(@$names);
 
 	DEBUG( "got response to $qtype for $domain: $rcode" );
@@ -1085,7 +1148,8 @@ sub _got_A {
 }
 
 sub _check_A_match {
-	my ($self,$qual,$domain,$plen,$addr,$names,$mech) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$domain,$plen,$addr,$names,$mech) = @_;
 
 	# process all found addresses
 	if ( $self->{clientip4} ) {
@@ -1142,7 +1206,8 @@ sub _check_A_match {
 # additional section of the DNS response
 ############################################################################
 sub _mech_mx {
-	my ($self,$qual,$domain,$plen) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$domain,$plen) = @_;
 	$domain = $domain->{expanded} if ref $domain;
 	DEBUG( "mech mx:$domain/$plen with qual=$qual" );
 	if ( my @err = _check_domain($domain,
@@ -1158,7 +1223,8 @@ sub _mech_mx {
 }
 
 sub _got_MX {
-	my ($self,$qtype,$rcode,$ans,$add,$qual,$domain,$plen) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add,$qual,$domain,$plen) = @_;
 
 	if ( $rcode eq 'NXDOMAIN' ) {
 		# no records found
@@ -1203,7 +1269,8 @@ sub _got_MX {
 # I use IP6 - this is RBL style)
 ############################################################################
 sub _mech_exists {
-	my ($self,$qual,$domain) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
 	DEBUG( "mech exists:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "exists:$domain" )) {
@@ -1218,7 +1285,8 @@ sub _mech_exists {
 }
 
 sub _got_A_exists {
-	my ($self,$qtype,$rcode,$ans,$add,$qual,$domain) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add,$qual,$domain) = @_;
 
 	return if $rcode ne 'NOERROR'; # no match
 	return if ! @$ans; # no A records
@@ -1237,7 +1305,8 @@ sub _got_A_exists {
 #   lookups until one domain can be validated
 ############################################################################
 sub _mech_ptr {
-	my ($self,$qual,$domain) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
 	DEBUG( "mech ptr:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "ptr:$domain" )) {
@@ -1274,7 +1343,8 @@ sub _mech_ptr {
 }
 
 sub _got_PTR {
-	my ($self,$qtype,$rcode,$ans,$add,$qual,$query,$domain) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add,$qual,$query,$domain) = @_;
 
 	# ignore mech if it can not be validated
 	return if $rcode ne 'NOERROR';
@@ -1296,7 +1366,8 @@ sub _got_PTR {
 }
 
 sub _got_A_ptr {
-	my ($self,$qtype,$rcode,$ans,$add,$qual,$names) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add,$qual,$names) = @_;
 
 	for my $dummy ( $rcode eq 'NOERROR' ? (1):() ) {
 		@$ans or last; # no addr for domain? - try next
@@ -1344,7 +1415,8 @@ sub _got_A_ptr {
 # from this inner SPF as match for the include mechanism
 ############################################################################
 sub _mech_include {
-	my ($self,$qual,$domain) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
 	DEBUG( "mech include:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "include:$domain" )) {
@@ -1376,7 +1448,8 @@ sub _mech_include {
 # create explain message from TXT record
 ############################################################################
 sub _got_TXT_exp {
-	my ($self,$qtype,$rcode,$ans,$add) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add) = @_;
 	my $final = $self->{result};
 
 	if ( $rcode ne 'NOERROR' ) {
@@ -1426,7 +1499,8 @@ sub _got_TXT_exp {
 # expand Macros
 ############################################################################
 sub _macro_expand {
-	my ($self,$domain,$explain) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($domain,$explain) = @_;
 	my $new_domain = '';
 	my $mchars = $explain ? qr{[slodipvhcrt]}i : qr{[slodipvh]}i;
 	my $need_validated;
@@ -1532,7 +1606,8 @@ sub _macro_expand {
 # %{p} with it. This has many thing similar with the ptr: method
 ############################################################################
 sub _resolve_macro_p {
-	my ($self,$rec) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my $rec = shift;
 	my $ip = ref($rec) && $rec->{ip} or return; # nothing to resolve
 
 	# could it already be resolved w/o further lookups?
@@ -1556,7 +1631,8 @@ sub _resolve_macro_p {
 }
 
 sub _validate_got_PTR {
-	my ($self,$qtype,$rcode,$ans,$add,$rec ) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add,$rec ) = @_;
 
 	# no validation possible if no records
 	return if $rcode ne 'NOERROR' or ! @$ans;
@@ -1582,7 +1658,8 @@ sub _validate_got_PTR {
 }
 
 sub _validate_got_A_ptr {
-	my ($self,$qtype,$rcode,$ans,$add,$rec,$names) = @_;
+	my Mail::SPF::Iterator $self = shift;
+	my ($qtype,$rcode,$ans,$add,$rec,$names) = @_;
 
 	if ( $rcode eq 'NOERROR' ) {
 		my @addr = map { $_->address } @$ans or do {

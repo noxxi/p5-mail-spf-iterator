@@ -1,3 +1,8 @@
+1.00 2008-11-25
+- declare all $self as Mail::SPF::Iterator object
+- add method to get/set default explanation string
+- call it feature complete -> set version to 1.0
+
 0.10 2008-11-24
 - license clarification for SPF test suite in COPYRIGHT and add
   t/rfc4408-tests.LICENSE to distribution
