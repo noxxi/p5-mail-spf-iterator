@@ -58,6 +58,13 @@ queries and later expects the responses.
 Lookup of the DNS records will be done outside of the module and can be done
 in a event driven way.
 
+This module can also make use of SenderID records for checking the C<mfrom>
+part, but only if it finds an SenderID record first (e.g. if the SPF reply 
+contains only SenderID and the the TXT SenderID and SPF and it gets the SPF
+reply first it will use SenderID, if it gets TXT first it will use SPF).
+
+See RFC4408 for SPF and RFC4406 for SenderID.
+
 =head1 METHODS
 
 =over 4
@@ -174,7 +181,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.00';
+our $VERSION = '1.01';
 our $DEBUG=0;
 
 use fields qw( clientip4 clientip6 domain sender helo myname
@@ -212,9 +219,7 @@ BEGIN {
 our @EXPORT;
 use constant SPF_Noop => '_NOOP';
 BEGIN {
-	my $i=0;
 	for (qw(TempError PermError Pass Fail SoftFail Neutral None )) {
-		++$i;
 		no strict 'refs';
 		*{"SPF_$_"} = eval "sub () { '$_' }";
 		push @EXPORT, "SPF_$_";
@@ -227,6 +232,7 @@ sub DEBUG {
 	$DEBUG or return; # check against debug level
 	my (undef,$file,$line) = caller;
 	my $msg = shift;
+	# limit filename to 20
 	$file = '...'.substr( $file,-17 ) if length($file)>20;
 	$msg = sprintf $msg,@_ if @_;
 	print STDERR "DEBUG: $file:$line: $msg\n";
@@ -284,7 +290,8 @@ sub new {
 
 	my $ip4 = eval { inet_aton($ip) };
 	my $ip6 = ! $ip4 && $can_ip6 && eval { inet_pton(AF_INET6,$ip) };
-	die "no client IP4 or IP6 known (can_ip6=$can_ip6): $ip" if ! $ip4 and ! $ip6;
+	die "no client IP4 or IP6 known (can_ip6=$can_ip6): $ip" 
+		if ! $ip4 and ! $ip6;
 
 	if ( $ip6 ) {
 		my $m = inet_pton( AF_INET6,'::ffff:0.0.0.0' );
@@ -299,7 +306,7 @@ sub new {
 		clientip4 => $ip4,     # IP of client
 		clientip6 => $ip6,     # IP of client
 		domain => $domain,     # current domain
-		sender => $sender,     # sender
+		sender => $sender,     # sender (mailfrom|helo)
 		helo   => $helo,       # helo
 		myname => $myname,     # name of mail host itself
 		include_stack => [],   # stack in case of include
@@ -441,7 +448,7 @@ sub mailheader {
 #   $cbid: id of callback, used to check if this is an expected reply
 #   $dnsresp: DNS reply
 # Returns: ($final,@args)
-#   $final: undef or something of Pass|Fail|SoftFail|Neutral|None|PermError|TermpError
+#   $final: undef or something of Pass|Fail|SoftFail|Neutral|None|PermError|TempError
 #   @args:  if !$final then ID+new DNS requests, if !@args the data were ignored
 #           if  $final $args[0] is info and %{$args[1]} is hash with mechanism,
 #           problem... for Received-SPF header
@@ -885,9 +892,9 @@ sub _got_txt_spf {
 		unless ( eval { $self->_parse_spf( $spfdata[0] ) }) {
 			# this is an invalid SPF record
 			# make it a permanent error
-			# it does not matter if the TXT is bad and the SPF is right
+			# it does not matter if the other type of record is good
 			# because according to RFC if both provide SPF (v=spf1..)
-			# they should be the same
+			# they should be the same, so the other one should be bad too
 			return ( SPF_PermError,
 				"checking $qtype for $self->{domain}",
 				{ problem => "invalid SPF record: $@" }
@@ -916,7 +923,7 @@ sub _got_txt_spf {
 
 
 ############################################################################
-# parse SPF record, returns \@parts if record looks valid,
+# parse SPF record, returns 1 if record looks valid,
 # otherwise die()s with somewhat helpful error message
 ############################################################################
 sub _parse_spf {
@@ -1017,9 +1024,7 @@ sub _parse_spf {
 			}
 
 		} elsif ( $mod ) {
-			# RFC 4408 doesn't say anything about multiple redirect or
-			# explain - they don't make sense, but we won't consider
-			# it as an error here, we just use only the first spec
+			# multiple redirect or explain will be considered an error
 			if ( $mod eq 'redirect' ) {
 				die "redirect was specified more than once\n" if $redirect;
 				my ($domain) = ( $arg || '' )=~m{^=([^/]+)$}
