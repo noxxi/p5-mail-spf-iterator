@@ -154,14 +154,6 @@ For convenience the constants SPF_TempError, SPF_PermError, SPF_Pass, SPF_Fail,
 SPF_SoftFail, SPF_Neutral, SPF_None are exported, which have the values
 C<"TempError">, C<"PermError"> ...
 
-=head1 BUGS
-
-The module currently needs to have the A|AAAA records in the additional data
-of the DNS reply when doing a MX lookup. This will usually done by recursive
-resolvers.
-
-Apart from that it passes the SPF test suite from opensf.org.
-
 =head1 AUTHOR
 
 Steffen Ullrich <sullr@cpan.org>
@@ -457,227 +449,258 @@ sub next {
 	my Mail::SPF::Iterator $self = shift;
 	my ($cbid,$dnsresp) = @_;
 
-	my @rv;
-	if ( my $cb = $self->{cb} ) {
-		if ( $cbid != $self->{cbid} ) {
-			# unexpected reply, maybe got TXT after SPF was already processed...
-			DEBUG( "$cbid is not the expected cbid=$self->{cbid}" );
-			return; # should ignore
-		}
-
-		my $cb_queries = $self->{cbq};
-		if ( ! @$cb_queries ) {
-			# we've got a reply, but no outstanding queries - ignore
-			DEBUG( "got reply w/o queries" );
-			return;
-
-		}
-		# check if the reply matches one of the queries
-		my ($q,$err);
-		if ( ! UNIVERSAL::isa( $dnsresp, 'Net::DNS::Packet' )) {
-			# probably [ $query, $errorstring ]
-			($q,$err) = @$dnsresp;
-			$dnsresp = $err;
-			($q) = $q->question;
-			$err ||= 'unknown error';
-			DEBUG( "error '$err' to query ".$q->string );
-		} else {
-			($q) = $dnsresp->question;
-		}
-		my $qtype = $q->qtype;
-
-		my $found;
-		for (@$cb_queries) {
-			# presentation2wire
-			# for whatever reason \032 is not octal but chr(32),
-			# see Net::DNS::wire2presentation
-			# $_->{q}->qname has still the raw (wire) value, because it was set to it
-			# but the qname of the response has the non-wire presentation :(
-			# fortunatly this applies only to DNS names with special chars
-			( my $qname = lc($q->qname) )
-				=~s{\\(?:(\d\d\d)|(.))}{ $2 || chr($1) }esg;
-
-			if ( $qtype eq $_->{q}->qtype and $qname eq lc($_->{q}->qname)) {
-				$found = $_;
-				last;
-			}
-		}
-
-		if ( ! $found ) {
-			# unexpected response, type or domain do not match query
-			my %want = map { $_->{q}->qtype => 1 } @$cb_queries;
-			my %name = map { $_->{q}->qname => 1 } @$cb_queries;
-			DEBUG( "found no open query for ".$q->string );
-			return ( SPF_TempError,
-				"getting ".join("|",keys %want)." for ".join("|",keys %name),
-				{ problem => "unexpected DNS response" },
-			);
-
-		} elsif ( ++$found->{done} > 1 ) {
-			# duplicate response - ignore
-			return;
-		}
-
-		if ( $err ) {
-			if ( grep { ! $_->{done} } @$cb_queries ) {
-				# we have outstanding queries return () as a sign, that we
-				# ignore this error
-				DEBUG( "ignore error '$err', because we have more oustanding queries" );
-				return;
-
-			} elsif ( my $r = $self->{result} ) {
-				# we have a final result already, so this is an error looking up data
-				# for explain ->1 set to default explain and return final result
-				DEBUG( "error looking up data for explain: $err" );
-				return @$r;
-
-			} else {
-				# we have no final result yet (e.g this query was not triggered by
-				# lookups for explain data) -> TempError
-				DEBUG( "TempError: $err" );
-				my %want = map { $_->{q}->qtype => 1 } @$cb_queries;
-				my %name = map { $_->{q}->qname => 1 } @$cb_queries;
-				return ( SPF_TempError,
-					"getting ".join("|",keys %want)." for ".join("|",keys %name),
-					{ problem => "error getting DNS response" }
-				);
-			}
-		}
-
-		my ($sub,@arg) = @$cb; # Callback
-
-		# check if answer matches query
-		my $rcode = $dnsresp->header->rcode;
-		if ( $rcode ne 'NOERROR' ) {
-			# call callback with no records
-			@rv = $sub->($self,$qtype,$rcode,[],[],@arg);
-
-		} else {
-			# extract answer and additional data
-			# verify names and types in answer records
-			# and handle CNAMEs
-			my $qname = $q->qname;
-			my (%cname,%ans);
-			for my $rr ($dnsresp->answer) {
-				my $rtype = $rr->type;
-				if ( $rtype eq 'CNAME' ) {
-					if ( exists $cname{$rr->name} ) {
-						DEBUG( "more than one CNAME for same name" );
-						next; # XXX should we TempError instead of ignoring?
-					}
-					$cname{$rr->name} = $rr->cname;
-				} elsif ( $rtype eq $qtype ) {
-					push @{ $ans{$rr->name}},$rr;
-				} else {
-					# XXXX should we TempError instead of ignoring?
-					DEBUG( "unexpected answer record for $qtype:$qname" );
-				}
-			}
-
-			# find all valid names, usually there should be at most one CNAME
-			my @names = ($qname);
-			while ( %cname ) {
-				push @names, delete @cname{@names} or last;
-			}
-			if ( %cname ) {
-				# Report but ignore - XXX should we TempError instead?
-				DEBUG( "unrelated CNAME records ".Dumper(\%cname));
-			}
-
-			# collect the RR for all valid names
-			my @ans;
-			for (@names) {
-				my $rrs = delete $ans{$_} or next;
-				push @ans,@$rrs;
-			}
-
-			if ( ! @ans and @names>1 ) {
-				# according to RFC1034 all RR for the type should be put into
-				# the answer section together with the CNAMEs
-				# so if there are no RRs in this answer, we should assume, that
-				# there are no RRs at all
-				DEBUG( "no answer records for $qtype, but names @names" );
-			}
-
-			@rv = $sub->($self,$qtype,$rcode,\@ans,[ $dnsresp->additional ],@arg);
-		}
-
-
-	} else {
-		# no callback yet - must be initial
-		die "no callback but DNS response given" if $dnsresp;
-		@rv = $self->_query_txt_spf;
+	if ( ! $dnsresp ) {
+		# no DNS response - must be initial call to next
+		die "no DNS reply but callback given" if $self->{cb};
+		return $self->_next_process_cbrv( $self->_query_txt_spf );
 	}
 
-	# loop until I get a final result
-	for my $dummy (1) {
+	# handle DNS reply
+	defined $cbid or die "no cbid but DNS reply";
+	my $callback = $self->{cb} or die "no callback but DNS reply";
+	if ( $cbid != $self->{cbid} ) {
+		# unexpected reply, maybe got TXT after SPF was already processed...
+		DEBUG( "$cbid is not the expected cbid=$self->{cbid}, ignoring reply" );
+		return; # ignore
+	}
 
-		#DEBUG( "loop rv=".Data::Dumper->new([\@rv])->Maxdepth(1)->Dump );
+	my $cb_queries = $self->{cbq};
+	if ( ! @$cb_queries ) {
+		# we've got a reply, but no outstanding queries - ignore
+		DEBUG( "got reply w/o queries, ignoring" );
+		return;
+	}
+
+	# extract query from reply
+	my ($q,$err);
+	if ( ! UNIVERSAL::isa( $dnsresp, 'Net::DNS::Packet' )) {
+		# probably [ $query, $errorstring ]
+		($q,$err) = @$dnsresp;
+		$dnsresp = $err;
+		($q) = $q->question;
+		$err ||= 'unknown error';
+		DEBUG( "error '$err' to query ".$q->string );
+	} else {
+		($q) = $dnsresp->question;
+	}
+	my $qtype = $q->qtype;
+
+	# check if the reply matches one of the open queries
+	my $found;
+	for (@$cb_queries) {
+		# presentation2wire
+		# $_->{q}->qname has still the raw (wire) value, because it was set to it
+		# but the qname of the response has the human readable presentation from 
+		# the zonefiles :(
+		# fortunatly this applies only to DNS names with special chars
+		# see Net::DNS::wire2presentation
+		( my $qname = lc($q->qname) )
+			=~s{\\(?:(\d\d\d)|(.))}{ $2 || chr($1) }esg;
+
+		if ( $qtype eq $_->{q}->qtype and $qname eq lc($_->{q}->qname)) {
+			$found = $_;
+			last;
+		}
+	}
+
+	if ( ! $found ) {
+		# unexpected response, type or domain do not match query -> TempError
+		my %want = map { $_->{q}->qtype => 1 } @$cb_queries;
+		my %name = map { $_->{q}->qname => 1 } @$cb_queries;
+		DEBUG( "found no open query for ".$q->string );
+		return ( SPF_TempError,
+			"getting ".join("|",keys %want)." for ".join("|",keys %name),
+			{ problem => "unexpected DNS response" },
+		);
+	} elsif ( ++$found->{done} > 1 ) {
+		# duplicate response - ignore
+		DEBUG( "duplicate response, ignoring" );
+		return;
+	}
+
+	# found matching query
+	# check for error
+	if ( $err ) {
+		if ( grep { ! $_->{done} } @$cb_queries ) {
+			# we have still outstanding queries, so we might still get an answer
+			# -> return () as a sign, that we ignore this error
+			DEBUG( "ignore error '$err', because we have still oustanding queries" );
+			return;
+
+		} elsif ( my $r = $self->{result} ) {
+			# we have a final result already, so this error occured only while
+			# trying to expand %{p} for explain
+			# -> ignore error, set to default explain and return final result
+			DEBUG( "error looking up data for explain: $err" );
+			return @$r;
+
+		} else {
+			# we have no final result yet -> TempError
+			DEBUG( "TempError: $err" );
+			my %want = map { $_->{q}->qtype => 1 } @$cb_queries;
+			my %name = map { $_->{q}->qname => 1 } @$cb_queries;
+			return ( SPF_TempError,
+				"getting ".join("|",keys %want)." for ".join("|",keys %name),
+				{ problem => "error getting DNS response" }
+			);
+		}
+	}
+
+
+	# call callback with no records on error
+	my $rcode = $dnsresp->header->rcode;
+	if ( $rcode ne 'NOERROR' ) {
+		my ($sub,@arg) = @$callback;
+		return $self->_next_process_cbrv( $sub->($self,$qtype,$rcode,[],[],@arg));
+	}
+
+	# extract answer and additional data
+	# verify if names and types in answer records match query
+	# handle CNAMEs
+	my $qname = $q->qname;
+	my (%cname,%ans);
+	for my $rr ($dnsresp->answer) {
+		my $rtype = $rr->type;
+		if ( $rtype eq 'CNAME' ) {
+			# remember CNAME so that we can check that the answer record
+			# for $qtype matches name from query or CNAME which is an alias
+			# for name
+			if ( exists $cname{$rr->name} ) {
+				DEBUG( "more than one CNAME for same name" );
+				next; # XXX should we TempError instead of ignoring?
+			}
+			$cname{$rr->name} = $rr->cname;
+		} elsif ( $rtype eq $qtype ) {
+			push @{ $ans{$rr->name}},$rr;
+		} else {
+			# XXXX should we TempError instead of ignoring?
+			DEBUG( "unexpected answer record for $qtype:$qname" );
+		}
+	}
+
+	# find all valid names, usually there should be at most one CNAME
+	# works by starting with name from query, finding CNAMEs for it,
+	# adding these to set and finding next CNAMEs etc
+	# if there are unconnected CNAMEs they will be left in %cname
+	my @names = ($qname);
+	while ( %cname ) {
+		push @names, delete @cname{@names} or last;
+	}
+	if ( %cname ) {
+		# Report but ignore - XXX should we TempError instead?
+		DEBUG( "unrelated CNAME records ".Dumper(\%cname));
+	}
+
+	# collect the RR for all valid names
+	my @ans;
+	for (@names) {
+		my $rrs = delete $ans{$_} or next;
+		push @ans,@$rrs;
+	}
+	if ( %ans ) {
+		# answer records which don't match name from query or via CNAME
+		# derived names
+		# Report but ignore - XXX should we TempError instead?
+		DEBUG( "unrelated answer records for $qtype".Dumper(\%ans));
+	}
+
+	if ( ! @ans and @names>1 ) {
+		# according to RFC1034 all RR for the type should be put into
+		# the answer section together with the CNAMEs
+		# so if there are no RRs in this answer, we should assume, that
+		# there will be no RRs at all
+		DEBUG( "no answer records for $qtype, but names @names" );
+	}
+
+	my ($sub,@arg) = @$callback;
+	return $self->_next_process_cbrv( 
+		$sub->($self,$qtype,$rcode,\@ans,[ $dnsresp->additional ],@arg));
+}
+
+############################################################################
+# process results from callback to DNS reply
+# Args: ($self,@rv)
+#  @rv: result from callback, either
+#       @query - List of new Net::DNS::Packet queries for next step
+#       ()     - no result (go on with next step)
+#       (status,...) - final response
+# Returns: ... - see sub next
+############################################################################
+sub _next_process_cbrv {
+	my Mail::SPF::Iterator $self = shift;
+	my @rv = @_; # results from callback to _mech*
+
+	# loop until one gets final result or more DNS questions
+	for my $dummy (1) {
 
 		if ( $self->{result} && ! @rv ) {
 			# resolving of %{p} in exp= mod or explain TXT results in @rv = ()
+			# see sub _validate_*
 			# set to final result
 			@rv = @{ $self->{result}};
 		}
 
-
-		##### ignored, try to find next action
+		##### if callback returned (), e.g mechanism does not match
+		##### go on with next mechanism
 		if ( ! @rv ) {
-			#DEBUG( "ignored" );
 
-			my $next = shift @{$self->{mech}};
-			if ( ! $next ) {
-
-				# do we have a redirect?
-				if ( my $domain = $self->{redirect} ) {
-					if ( ref $domain ) {
-						# need to resolve %{p}
-						if ( $domain->{macro} ) { # needs resolving
-							@rv = $self->_resolve_macro_p($domain);
-							return @rv if @rv;
-						}
-						$self->{redirect} = $domain = $domain->{expanded};
-					}
-					if ( my @err = _check_domain($domain,"redirect:$domain" )) {
-						return @err
-					}
-
-					return ( SPF_PermError, "",
-						{ problem => "Number of DNS mechanism exceeded" })
-						if --$self->{limit_dns_mech} < 0;
-
-					$self->{domain}   = $domain;
-					$self->{mech}     = [];
-					$self->{explain}  = undef;
-					$self->{redirect} = undef;
-
-					# start with new SPF record
-					@rv = $self->_query_txt_spf;
-					redo;
-				}
-
-				# up from include?
-				my $st = $self->{include_stack};
-				if (@$st) {
-					my $top = pop @$st;
-					delete $top->{qual};
-					while ( my ($k,$v) = each %$top ) {
-						$self->{$k} = $v;
-					}
-					redo;
-				}
-
-				# no more data
-				return ( SPF_Neutral,'no matches' );
+			# if we have more mechanisms in the current SPF record take next
+			if ( my $next = shift @{$self->{mech}} ) {
+				my ($sub,@arg) = @$next;
+				@rv = $sub->($self,@arg);
+				redo;
 			}
 
-			my ($sub,@arg) = @$next;
-			@rv = $sub->($self,@arg);
-			redo;
+			# if no mechanisms in current SPF record but we have a redirect
+			# continue with the SPF record from the new location
+			if ( my $domain = $self->{redirect} ) {
+				if ( ref $domain ) {
+					# need to resolve %{p}
+					if ( $domain->{macro} and 
+						( my @xrv = $self->_resolve_macro_p($domain))) {
+						return @xrv;
+					}
+					$self->{redirect} = $domain = $domain->{expanded};
+				}
+				if ( my @err = _check_domain($domain,"redirect:$domain" )) {
+					return @err
+				}
 
+				return ( SPF_PermError, "",
+					{ problem => "Number of DNS mechanism exceeded" })
+					if --$self->{limit_dns_mech} < 0;
+
+				# reset state information
+				$self->{mech}     = [];
+				$self->{explain}  = undef;
+				$self->{redirect} = undef;
+
+				# set domain to domain from redirect
+				$self->{domain}   = $domain;
+
+				# restart with new SPF record
+				@rv = $self->_query_txt_spf;
+				redo;
+			}
+
+			# if there are still no more mechanisms available and we are inside
+			# an include go up the include stack
+			my $st = $self->{include_stack};
+			if (@$st) {
+				my $top = pop @$st;
+				delete $top->{qual};
+				while ( my ($k,$v) = each %$top ) {
+					$self->{$k} = $v;
+				}
+				redo;
+			}
+
+			# finally give up and return SPF_Neutral 
+			return ( SPF_Neutral,'no matches' );
 		}
 
-		##### list of DNS packets ? -> return as (undef,cbid,@pkts)
+		##### return list of DNS packets  as (undef,$cbid,@dnspkt)
+		##### remember new queries for later verification in sub next
 		if ( UNIVERSAL::isa( $rv[0],'Net::DNS::Packet' )) {
 			$self->{cbq} = [ map { my ($q) = $_->question; { q => $q } } @rv ];
 			DEBUG( "need to lookup ".join( " | ", map { "'".$_->{q}->string."'" }
@@ -685,20 +708,25 @@ sub next {
 			return ( undef, ++$self->{cbid}, @rv );
 		}
 
-		##### waiting for additional data to current request
+		##### special case when we ignore the current response and just wait
+		##### for more. Only used when we could get multiple responses, e.g when
+		##### multiple DNS requests were send ( query for SPF+TXT )
 		if ( $rv[0] eq SPF_Noop and grep { ! $_->{done} } @{ $self->{cbq}} ) {
 			return;
 		}
 
-		##### else final response (status,why,err)
-		if ( my $top = pop @{ $self->{include_stack} } ) { # pre-final
+		##### If inside include consider response as pre-final and propagate it
+		##### the include stack up: see RFC4408, 5.2 for propagation of results 
+		if ( my $top = pop @{ $self->{include_stack} } ) { 
 			DEBUG( "pre-final response $rv[0]" );
+
+			# Noop+Errors will be finally errors 
 			$rv[0] = SPF_PermError if $rv[0] eq SPF_None;
 			if ( $rv[0] eq SPF_TempError || $rv[0] eq SPF_PermError ) {
 				# keep response as final
-				last;
+
 			} else {
-				# restore saved data
+				# go stack up, restore saved data
 				my $qual = delete $top->{qual};
 				while ( my ($k,$v) = each %$top ) {
 					$self->{$k} = $v;
@@ -706,31 +734,30 @@ sub next {
 				if ( $rv[0] eq SPF_Pass ) {
 					$rv[0] = $qual;  # Pass == match
 				} else {
-					@rv = ();        # !Pass == non-match -> ignore
-					redo;
+					@rv = ();        # !Pass == non-match
 				}
+				redo;
 			}
 		}
 
-		# special case when we ignore the current response and just wait
-		# for more. Only used when we could get multiple responses, e.g when
-		# multiple DNS requests were send ( query for SPF+TXT )
-		if ( @rv == 1 and $rv[0] eq SPF_Noop ) {
-			return;
-		}
-
+		##### @rv is the final result, save it
 		my $final = $self->{result} ||= [ @rv ];
-		last if $final->[0] ne SPF_Fail;
 
-		# Fail: lookup explain
+		##### now the only things left is to handle explain in case of SPF_Fail
+		last if $final->[0] ne SPF_Fail; # finally done
+
+		# set default explanation
 		$final->[3] = $self->explain_default if ! defined $final->[3];
 
+		##### lookup TXT record for explain
 		if ( my $exp = delete $self->{explain} ) {
 			if (ref $exp) {
 				if ( my @xrv = $self->_resolve_macro_p($exp)) {
 					# we need to do more DNS lookups for resolving %{p} macros
+					# inside the exp=... modifier, before we get the domain name
+					# which contains the TXT for explain
 					DEBUG( "need to resolve %{p} in $exp->{macro}" );
-					$self->{explain} = $exp;
+					$self->{explain} = $exp; # put back until resolved
 					@rv = @xrv;
 					redo;
 				}
@@ -744,15 +771,17 @@ sub next {
 			$self->{cb} = [ \&_got_TXT_exp ];
 			@rv =( Net::DNS::Packet->new( $exp,'TXT','IN' ));
 			redo;
+		}
 
-		} elsif ( $exp = delete $final->[4] ) {
+		##### resolve macros in TXT record for explain
+		if ( my $exp = delete $final->[4] ) {
 			# we had a %{p} to resolve in the TXT we got for explain,
 			# see _got_TXT_exp -> should be expanded now
 			$final->[3] = $exp->{expanded};
 
-			# This was the last action needed
 		}
 
+		##### This was the last action needed
 		return @$final;
 	}
 
