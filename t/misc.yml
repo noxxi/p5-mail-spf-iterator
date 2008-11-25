@@ -20,6 +20,38 @@ tests:
     mailfrom: user@example1.net
     explanation: forbidden for one.two.three.five.example.net
     result: fail
+  sender-id:
+    description: >-
+      no SPF record but SenderID
+    spec: ""
+    helo: mail.example.net
+    host: 1.2.3.5
+    mailfrom: user@example2.net
+    result: pass
+  sender-id-pick-mfrom1:
+    description: >-
+      SenderID with mfrom and pra, pick mfrom
+    spec: ""
+    helo: mail.example.net
+    host: 1.2.3.5
+    mailfrom: user@example3.net
+    result: pass
+  sender-id-pick-mfrom2:
+    description: >-
+      SenderID with mfrom and pra, pick mfrom
+    spec: ""
+    helo: mail.example.net
+    host: 1.2.3.5
+    mailfrom: user@example4.net
+    result: fail
+  sender-id-pick-spf:
+    description: >-
+      SenderID with mfrom and SPF, pick SPF
+    spec: ""
+    helo: mail.example.net
+    host: 1.2.3.5
+    mailfrom: user@example5.net
+    result: pass
 zonedata:
   example.net:
     - CNAME: example.com
@@ -35,3 +67,14 @@ zonedata:
     - TXT: forbidden for %{p}
   unknown.explain.example1.net:
     - TXT: bad message for %{p}
+  example2.net:
+    - SPF:  spf2.0/pra,mfrom ip4:1.2.3.5 -all
+  example3.net:
+    - SPF:  spf2.0/pra -ip4:1.2.3.5 all
+    - SPF:  spf2.0/mfrom ip4:1.2.3.5 -all
+  example4.net:
+    - SPF:  spf2.0/mfrom -ip4:1.2.3.5 all
+    - SPF:  spf2.0/pra ip4:1.2.3.5 -all
+  example5.net:
+    - SPF:  spf2.0/mfrom -ip4:1.2.3.5 all
+    - SPF:  v=spf1 ip4:1.2.3.5 -all

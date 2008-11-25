@@ -1,12 +1,36 @@
 [
   {
     'tests' => {
+      'sender-id-pick-spf' => {
+        'spec' => '',
+        'mailfrom' => 'user@example5.net',
+        'description' => 'SenderID with mfrom and SPF, pick SPF',
+        'result' => 'pass',
+        'host' => '1.2.3.5',
+        'helo' => 'mail.example.net'
+      },
+      'sender-id-pick-mfrom1' => {
+        'spec' => '',
+        'mailfrom' => 'user@example3.net',
+        'description' => 'SenderID with mfrom and pra, pick mfrom',
+        'result' => 'pass',
+        'host' => '1.2.3.5',
+        'helo' => 'mail.example.net'
+      },
       'spf-by-cname' => {
         'spec' => '',
         'comment' => 'The SPF Lookup returns a CNAME and the SPF record',
         'mailfrom' => 'user@example.net',
         'description' => 'TXT/SPF records can be referenced through CNAME',
         'result' => 'pass',
+        'host' => '1.2.3.5',
+        'helo' => 'mail.example.net'
+      },
+      'sender-id-pick-mfrom2' => {
+        'spec' => '',
+        'mailfrom' => 'user@example4.net',
+        'description' => 'SenderID with mfrom and pra, pick mfrom',
+        'result' => 'fail',
         'host' => '1.2.3.5',
         'helo' => 'mail.example.net'
       },
@@ -18,6 +42,14 @@
         'result' => 'fail',
         'host' => '1.2.3.5',
         'helo' => 'mail.example.net'
+      },
+      'sender-id' => {
+        'spec' => '',
+        'mailfrom' => 'user@example2.net',
+        'description' => 'no SPF record but SenderID',
+        'result' => 'pass',
+        'host' => '1.2.3.5',
+        'helo' => 'mail.example.net'
       }
     },
     'description' => 'various other tests',
@@ -27,7 +59,10 @@
           'TXT' => 'forbidden for %{p}'
         }
       ],
-      'example.com' => [
+      'example5.net' => [
+        {
+          'SPF' => 'spf2.0/mfrom -ip4:1.2.3.5 all'
+        },
         {
           'SPF' => 'v=spf1 ip4:1.2.3.5 -all'
         }
@@ -37,14 +72,17 @@
           'CNAME' => 'example.com'
         }
       ],
-      'unknown.explain.example1.net' => [
+      'example3.net' => [
         {
-          'TXT' => 'bad message for %{p}'
+          'SPF' => 'spf2.0/pra -ip4:1.2.3.5 all'
+        },
+        {
+          'SPF' => 'spf2.0/mfrom ip4:1.2.3.5 -all'
         }
       ],
-      'one.two.three.five.example.net' => [
+      'example2.net' => [
         {
-          'A' => '1.2.3.5'
+          'SPF' => 'spf2.0/pra,mfrom ip4:1.2.3.5 -all'
         }
       ],
       '5.3.2.1.in-addr.arpa' => [
@@ -55,6 +93,29 @@
       'example1.net' => [
         {
           'SPF' => 'v=spf1 -ip4:1.2.3.5 all exp=%{p4r}.explain.example1.net'
+        }
+      ],
+      'example4.net' => [
+        {
+          'SPF' => 'spf2.0/mfrom -ip4:1.2.3.5 all'
+        },
+        {
+          'SPF' => 'spf2.0/pra ip4:1.2.3.5 -all'
+        }
+      ],
+      'example.com' => [
+        {
+          'SPF' => 'v=spf1 ip4:1.2.3.5 -all'
+        }
+      ],
+      'one.two.three.five.example.net' => [
+        {
+          'A' => '1.2.3.5'
+        }
+      ],
+      'unknown.explain.example1.net' => [
+        {
+          'TXT' => 'bad message for %{p}'
         }
       ]
     }

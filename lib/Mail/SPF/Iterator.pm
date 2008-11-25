@@ -63,6 +63,10 @@ part, but only if it finds an SenderID record first (e.g. if the SPF reply
 contains only SenderID and the the TXT SenderID and SPF and it gets the SPF
 reply first it will use SenderID, if it gets TXT first it will use SPF).
 
+This behavior is not compatible with RFC4406 where SenderID records take 
+preference, but compatible with RFC4408 in that it uses SPF records and 
+provides a way to use SenderID if no SPF records are given.
+
 See RFC4408 for SPF and RFC4406 for SenderID.
 
 =head1 METHODS
@@ -886,8 +890,9 @@ sub _got_txt_spf {
 		#    type TXT are discarded.
 		# But it says that if both SPF and TXT are given they should be the
 		# same (3.1.1)
-		# so I think we can ignore the requirement 4.5.2 and just take the
-		# first record which is valid SPF
+		# so I think we can ignore the requirement 4.5.2 and just use the
+		# first record which is valid SPF, if the admin of the domain sets 
+		# TXT and SPF to different values it's his own problem
 
 		my (@spfdata,@senderid);
 		for my $rr (@$ans) {
@@ -895,7 +900,7 @@ sub _got_txt_spf {
 			$txtdata =~m{^
 				(?:
 					(v=spf1)
-					| spf2\.0/(?:mfrom(?:,pra)?|pra,mfrom)
+					| spf2\.\d/(?:[\w,]*\bmfrom\b[\w,]*)
 				)
 				(?:$|\040\s*)(.*)
 			}xi or next;
