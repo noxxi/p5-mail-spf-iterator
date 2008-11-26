@@ -60,7 +60,7 @@ for my $use_additionals ('with additionals','') {
 
 			my $spec = delete $d{spec};
 			$spec = [ $spec ] if ! ref($spec);
- 			my $comment = "$desc | $tname (@$spec) (@$result) $use_additionals";
+			my $comment = "$desc | $tname (@$spec) (@$result) $use_additionals";
 
 			if ( ! $can_ip6 and ( $d{host} =~m{::} or $tname =~m{ip6} )) {
 				print "ok # skip Socket6.pm not installed\n";

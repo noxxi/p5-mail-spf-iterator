@@ -297,7 +297,7 @@ sub new {
 		$helo =~m{\@([\w\-.]+)$} ? $1 :
 		$helo =~m{\@\[([\da-f:\.]+)\]$}i ? $1 :
 		$helo;
-	my ($sender,$identity) = $mailfrom ne '' 
+	my ($sender,$identity) = $mailfrom ne ''
 		? ( $mailfrom,'mailfrom' )
 		: ( $helo,'helo' );
 
