@@ -9,6 +9,7 @@
   DNS packets and make sure that reply matches id of query
 - set minimal version for Net::DNS to 0.62 , older versions have 
   problems with SPF
+- more tests
 
 1.00 2008-11-25
 - declare all $self as Mail::SPF::Iterator object

@@ -469,10 +469,11 @@ sub next {
 	my ($question,$err,$qid);
 	if ( ! UNIVERSAL::isa( $dnsresp, 'Net::DNS::Packet' )) {
 		# probably [ $question, $errorstring ]
-		(my $query,$dnsresp) = @$dnsresp;
+		(my $query,$err) = @$dnsresp;
 		($question) = $query->question;
 		$qid = $query->header->id;
 		$err ||= 'unknown error';
+		$dnsresp = $err;
 		DEBUG( "error '$err' to query ".$question->string );
 	} else {
 		($question) = $dnsresp->question;
@@ -536,10 +537,12 @@ sub next {
 			DEBUG( "TempError: $err" );
 			my %want = map { $_->{q}->qtype => 1 } @$cb_queries;
 			my %name = map { $_->{q}->qname => 1 } @$cb_queries;
-			return ( SPF_TempError,
+			my @rv = ( SPF_TempError,
 				"getting ".join("|",keys %want)." for ".join("|",keys %name),
 				{ problem => "error getting DNS response" }
 			);
+			$self->{result} = \@rv;
+			return @rv;
 		}
 	}
 
@@ -860,7 +863,7 @@ sub _check_domain {
 	if ( $domain =~m{[^\d.]}
 		&& $domain =~s{^($rx)\.?$}{$1} ) {
 		# looks like valid domain name
-		if ( grep { length == 0 || length>63 } split( m{\.}, $domain )) {
+		if ( grep { length == 0 || length>63 } split( m{\.},$domain,-1 )) {
 			@rv = ( SPF_PermError,"query $why", { problem =>
 				"DNS labels limited to 63 chars and should not be empty." });
 		} elsif ( length($domain)>253 ) {

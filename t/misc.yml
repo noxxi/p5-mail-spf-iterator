@@ -52,6 +52,14 @@ tests:
     host: 1.2.3.5
     mailfrom: user@example5.net
     result: pass
+  domain-dots-at-end:
+    description: >-
+      multiple dots at end of domain name are illegal
+    spec: "4.3/1"
+    helo: mail.example.net
+    host: 1.2.3.5
+    mailfrom: user@example5.net....
+    result: none
 zonedata:
   example.net:
     - CNAME: example.com

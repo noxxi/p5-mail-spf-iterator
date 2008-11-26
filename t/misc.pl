@@ -43,6 +43,14 @@
         'host' => '1.2.3.5',
         'helo' => 'mail.example.net'
       },
+      'domain-dots-at-end' => {
+        'spec' => '4.3/1',
+        'mailfrom' => 'user@example5.net....',
+        'description' => 'multiple dots at end of domain name are illegal',
+        'result' => 'none',
+        'host' => '1.2.3.5',
+        'helo' => 'mail.example.net'
+      },
       'sender-id' => {
         'spec' => '',
         'mailfrom' => 'user@example2.net',
