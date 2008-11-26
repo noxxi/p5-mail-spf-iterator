@@ -1,4 +1,8 @@
-1.01 2008-11-25
+1.02 2008-11-26
+- document all fields in module
+- report identity=helo in Received-SPF if helo, not mailfrom, is used
+
+1.01 2008-11-26
 - lots of code cleanups to make it better maintainable
 - detect and fix bug with deeply nested includes, where a Match
   (Pass) from a lower level gets directly propagated to the top

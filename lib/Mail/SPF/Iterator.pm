@@ -174,12 +174,30 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 our $DEBUG=0;
 
-use fields qw( clientip4 clientip6 domain sender helo myname
-	include_stack cb cbq validated limit_dns_mech
-	mech redirect explain result explain_default );
+use fields (
+	# values given in or derived from params to new()
+	'helo',            # helo given in new()
+	'myname',          # myname given in new()
+	'clientip4',       # packed ip from new() if IP4
+	'clientip6',       # packed ip from new() if IP6
+	'sender',          # mailfrom|helo given in new()
+	'domain',          # extracted from mailfrom|helo
+	'identity',        # 'mailfrom' if sender is mailfrom, else 'helo'
+	# internal states and values
+	'mech',            # list of unhandled mechanism for current SPF
+	'include_stack',   # stack for handling includes
+	'redirect',        # set to domain of redirect modifier of current SPF
+	'explain',         # set to explain modifier of current SPF
+	'cb',              # [$sub,@arg] for callback to DNS replies
+	'cbq',             # list of queries from last mech incl state
+	'validated',       # cache used in validation of hostnames for ptr and %{p}
+	'limit_dns_mech',  # countdown for number of mechanism using DNS queries
+	'explain_default', # default explanation of object specific
+	'result',          # contains final result
+);
 
 use Net::DNS;
 use Socket;
@@ -279,7 +297,9 @@ sub new {
 		$helo =~m{\@([\w\-.]+)$} ? $1 :
 		$helo =~m{\@\[([\da-f:\.]+)\]$}i ? $1 :
 		$helo;
-	my $sender = $mailfrom || $helo;
+	my ($sender,$identity) = $mailfrom ne '' 
+		? ( $mailfrom,'mailfrom' )
+		: ( $helo,'helo' );
 
 	my $ip4 = eval { inet_aton($ip) };
 	my $ip6 = ! $ip4 && $can_ip6 && eval { inet_pton(AF_INET6,$ip) };
@@ -301,13 +321,14 @@ sub new {
 		domain => $domain,     # current domain
 		sender => $sender,     # sender (mailfrom|helo)
 		helo   => $helo,       # helo
+		identity => $identity, # 'helo'|'mailfrom'
 		myname => $myname,     # name of mail host itself
 		include_stack => [],   # stack in case of include
 		cb => undef,           # callback for next DNS reply
 		cbq => [],             # the DNS queries for cb
 		validated => {},       # validated IP/domain names for PTR and %{p}
 		limit_dns_mech => 10,  # Limit on Number of DNS mechanism
-		mech => undef,         # spf mechanism
+		mech => undef,         # list of spf mechanism
 		redirect => undef,     # redirect from SPF record
 		explain => undef,      # explain from SPF record
 		result => undef,       # final result [ SPF_*, info, \%hash ]
@@ -420,7 +441,7 @@ sub mailheader {
 				: inet_ntop(AF_INET6,$self->{clientip6})
 			),
 		helo => $self->{helo},
-		identity => ( $self->{sender} ? 'mailfrom':'helo' ),
+		identity => $self->{identity},
 	);
 	for ( values(%t)) {
 		# Quote: this is not exactly rfc2822 but should be enough
