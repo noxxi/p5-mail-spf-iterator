@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 ############################################################################
 # THIS IS NOT A TEST!
-# make *.pl from YAML test suite, so that we don't have YAML as a 
+# make *.pl from YAML test suite, so that we don't have YAML as a
 # requirement for our tests
 ############################################################################
 use strict;
