@@ -88,15 +88,13 @@ for my $use_additionals ('with additionals','') {
 
 				my ($status,@ans) = $spf->next;
 				while ( ! $status ) {
-					my ($cbid,@query) = @ans;
+					my @query = @ans;
 					die "no queries" if ! @query;
 					for my $q (@query) {
 						#DEBUG( "next query >>> ".($q->question)[0]->string );
 						my $answer = $resolver->send( $q );
-						($status,@ans) = $spf->next( $cbid,$answer
-							? $answer
-							: [ $q, $resolver->errorstring ]
-						);
+						($status,@ans) = $spf->next( 
+							$answer || [ $q, $resolver->errorstring ]);
 						DEBUG( "status=$status" ) if $status;
 						last if $status or @ans;
 					}
@@ -197,6 +195,7 @@ sub send {
 	my $packet = Net::DNS::Packet->new($qname, $qtype, $qclass);
 	$packet->header->qr(1);
 	$packet->header->aa(1);
+	$packet->header->id($pkt->header->id);
 
 	my (%ans,$timeout,@answer,@cname);
 	while (1) {
@@ -286,7 +285,7 @@ sub send {
 			$packet->push(answer => @answer);
 			$packet->push(additional => @additional) if @additional;
 		}
-		#DEBUG( $packet->string );
+		DEBUG( $packet->string );
 		$packet->header->rcode('NOERROR');
 		return $packet;
 	}

@@ -1,8 +1,12 @@
 1.01 2008-11-25
-- code cleanups
+- lots of code cleanups to make it better maintainable
 - detect and fix bug with deeply nested includes, where a Match
   (Pass) from a lower level gets directly propagated to the top
+- detect and fix bugs, where final result (errors) where not
+  saved in $self->{result}
 - better SenderID support, some tests for SenderID records
+- no more cbid in next(), instead track DNS header ids of send 
+  DNS packets and make sure that reply matches id of query
 - set minimal version for Net::DNS to 0.62 , older versions have 
   problems with SPF
 
