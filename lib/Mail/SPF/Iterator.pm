@@ -851,17 +851,20 @@ sub _next_rv_dnsq {
 ############################################################################
 sub _check_macro_domain {
 	my ($domain,$why) = @_;
+	# 'domain-spec': see RFC4408 Appendix A for ABNF
 	my $rx = qr{
+		# macro-string
 		(?:
-			(?:
-				[^%\s]+ |
-				% (?: { [slodipvh] \d* r? [.\-+,/_=]* } | [%\-_] )
-			)+
+			[^%\s]+ |
+			% (?: { [slodipvh] \d* r? [.\-+,/_=]* } | [%\-_] )
 		)*
+		# domain-end
 		(?:(?:
+			# toplabel
 			\. [\da-z]*[a-z][\da-z]* |
 			\. [\da-z]+-[\-a-z\d]*[\da-z]
 		) | (?:
+			# macro-expand
 			% (?: { [slodipvh] \d* r? [.\-+,/_=]* } | [%\-_] )
 		))
 	}xi;
