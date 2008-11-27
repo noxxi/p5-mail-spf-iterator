@@ -1,6 +1,7 @@
 1.02 2008-11-26
 - document all fields in module
 - report identity=helo in Received-SPF if helo, not mailfrom, is used
+- fix and document regex in _check_macro_domain
 
 1.01 2008-11-26
 - lots of code cleanups to make it better maintainable
