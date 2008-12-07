@@ -2,11 +2,12 @@
 use strict;
 use warnings;
 use Mail::SPF::Iterator;
+#use Mail::SPF::Iterator DebugFunc => \&DEBUG;
 use Getopt::Long qw(:config posix_default bundling);
 
 #### Options
 GetOptions(
-	'd|debug' => \$Mail::SPF::Iterator::DEBUG,
+	'd|debug' => sub { Mail::SPF::Iterator->import( Debug => 1 ) },
 	'h|help' => sub { usage() }
 ) or usage();
 
@@ -29,4 +30,8 @@ sub usage { die <<USAGE; }
  $0 10.0.3.4 user\@example.com smtp.example.com smtp.example.local
 
 USAGE
+
+sub DEBUG {
+	print STDERR "DEBUG: @_\n";
+}
 

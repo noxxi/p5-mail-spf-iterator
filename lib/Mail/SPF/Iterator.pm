@@ -6,6 +6,7 @@ Mail::SPF::Iterator - iterative SPF lookup
 
 	use Net::DNS;
 	use Mail::SPF::Iterator;
+	use Mail::SPF::Iterator Debug =>1; # enable debugging
 	my $spf = Mail::SPF::Iterator->new(
 		$ip,       # IP4|IP6 of client
 		$mailfrom, # from MAIL FROM:
@@ -152,8 +153,28 @@ no lookups can be done in parallel in a single process/thread.
 =head1 EXPORTED SYMBOLS
 
 For convenience the constants SPF_TempError, SPF_PermError, SPF_Pass, SPF_Fail,
-SPF_SoftFail, SPF_Neutral, SPF_None are exported, which have the values
+SPF_SoftFail, SPF_Neutral, SPF_None are by default exported, which have the values
 C<"TempError">, C<"PermError"> ...
+
+=head2 Arguments to C<use>/C<import>
+
+The C<SPF_*> symbols are available for import and are exported if no arguments
+are given to C<use> or C<import>. Same effect with adding C<:DEFAULT> as an
+argument. Additionally the following arguments are supported:
+
+=over 4
+
+=item DebugFunc => \&coderef
+
+Sets a custom debug function, which just takes on argument. If given it will be
+called on all debug messages when debugging is active. This function takes as
+the only argument the debug message.
+
+=item Debug => 1|0
+
+Switches debugging on/off.
+
+=back
 
 =head1 AUTHOR
 
@@ -174,8 +195,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.02';
-our $DEBUG=0;
+our $VERSION = '1.03';
 
 use fields (
 	# values given in or derived from params to new()
@@ -237,10 +257,32 @@ BEGIN {
 	}
 }
 
+my $DEBUGFUNC;
+my $DEBUG=0;
+sub import {
+	goto &Exporter::import if @_ == 1; # implicit :DEFAULT
+	my $i = 1;
+	while ( $i<@_ ) {
+		if ( $_[$i] eq 'DebugFunc' ) {
+			$DEBUGFUNC = $_[$i+1];
+			splice( @_,$i,2 );
+			next;
+		} elsif ( $_[$i] eq 'Debug' ) {
+			$DEBUG = $_[$i+1];
+			splice( @_,$i,2 );
+			next;
+		}
+		++$i;
+	}
+	goto &Exporter::import if @_ >1; # not implicit :DEFAULT
+}
+
+
 
 ### Debugging
 sub DEBUG {
 	$DEBUG or return; # check against debug level
+	goto &$DEBUGFUNC if $DEBUGFUNC;
 	my (undef,$file,$line) = caller;
 	my $msg = shift;
 	# limit filename to 20
@@ -248,8 +290,6 @@ sub DEBUG {
 	$msg = sprintf $msg,@_ if @_;
 	print STDERR "DEBUG: $file:$line: $msg\n";
 }
-
-
 
 ### pre-compute masks for IP4, IP6
 my (@mask4,@mask6);
@@ -1160,7 +1200,7 @@ sub _parse_spf {
 sub _mech_all {
 	my Mail::SPF::Iterator $self = shift;
 	my $qual = shift;
-	DEBUG( "mech all with qual=$qual" );
+	DEBUG( "match mech all with qual=$qual" );
 	return ( $qual,'matches default', { mechanism => 'all' });
 }
 
@@ -1171,13 +1211,14 @@ sub _mech_all {
 sub _mech_ip4 {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qual,$ip,$plen) = @_;
-	DEBUG( "mech ip4:".inet_ntoa($ip)."/$plen with qual=$qual" );
 	defined $self->{clientip4} or return (); # ignore rule, no IP4 address
 	if ( ($self->{clientip4} & $mask4[$plen]) eq ($ip & $mask4[$plen]) ) {
 		# rules matches
+		DEBUG( "match mech ip4:".inet_ntoa($ip)."/$plen with qual=$qual" );
 		return ($qual,"matches ip4:".inet_ntoa($ip)."/$plen",
 			{ mechanism => 'ip4' } )
 	}
+	DEBUG( "no match mech ip4:".inet_ntoa($ip)."/$plen" );
 	return (); # ignore, no match
 }
 
@@ -1188,13 +1229,14 @@ sub _mech_ip4 {
 sub _mech_ip6 {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qual,$ip,$plen) = @_;
-	DEBUG( "mech ip6:".inet_ntop(AF_INET6,$ip)."/$plen with qual=$qual" );
 	defined $self->{clientip6} or return (); # ignore rule, no IP6 address
 	if ( ($self->{clientip6} & $mask6[$plen]) eq ($ip & $mask6[$plen])) {
 		# rules matches
+		DEBUG( "match mech ip6:".inet_ntop(AF_INET6,$ip)."/$plen with qual=$qual" );
 		return ($qual,"matches ip6:".inet_ntop(AF_INET6,$ip)."/$plen",
 			{ mechanism => 'ip6' } )
 	}
+	DEBUG( "no match ip6:".inet_ntop(AF_INET6,$ip)."/$plen" );
 	return (); # ignore, no match
 }
 
@@ -1207,12 +1249,13 @@ sub _mech_a {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qual,$domain,$plen) = @_;
 	$domain = $domain->{expanded} if ref $domain;
-	DEBUG( "mech a:$domain/$plen with qual=$qual" );
+	DEBUG( "check mech a:$domain/$plen with qual=$qual" );
 	if ( my @err = _check_domain($domain, "a:$domain/$plen")) {
 		# spec is not clear here:
 		# variante1: no match on invalid domain name -> return
 		# variante2: propagate err -> return @err
 		# we use variante2 for now
+		DEBUG( "no match mech a:$domain/$plen - @err" );
 		return @err;
 	}
 
@@ -1239,8 +1282,10 @@ sub _got_A {
 
 	DEBUG( "got response to $qtype for $domain: $rcode" );
 	if ( $rcode eq 'NXDOMAIN' ) {
+		DEBUG( "no match mech a:$domain/$plen - $rcode" );
 		# no records found
 	} elsif ( $rcode ne 'NOERROR' ) {
+		DEBUG( "temperror mech a:$domain/$plen - $rcode" );
 		return ( SPF_TempError,
 			"getting $qtype for $domain",
 			{ problem => "error resolving $domain" }
@@ -1260,7 +1305,7 @@ sub _check_A_match {
 		$plen = 32 if ! defined $plen;
 		my $mask = $mask4[$plen];
 		for my $addr (@$addr) {
-			DEBUG( "check $domain($addr)/$plen" );
+			DEBUG( "check a:$domain($addr)/$plen for mech $mech" );
 			my $packed = $addr=~m{^[\d.]+$} && eval { inet_aton($addr) }
 				or return ( SPF_TempError,
 					"getting A for $domain",
@@ -1269,6 +1314,7 @@ sub _check_A_match {
 
 			if ( ($packed & $mask) eq  ($self->{clientip4} & $mask) ) {
 				# match!
+				DEBUG( "match mech a:.../$plen for mech $mech with qual $qual" );
 				return ($qual,"matches domain: $domain/$plen with IP4 $addr",
 					{ mechanism => $mech })
 			}
@@ -1277,7 +1323,7 @@ sub _check_A_match {
 		$plen = 128 if ! defined $plen;
 		my $mask = $mask6[$plen];
 		for my $addr (@$addr) {
-			DEBUG( "check $domain($addr)/$plen" );
+			DEBUG( "check a:$domain($addr)//$plen for mech $mech" );
 			my $packed = eval { inet_pton(AF_INET6,$addr) }
 				or return ( SPF_TempError,
 					"getting AAAA for $domain",
@@ -1285,6 +1331,7 @@ sub _check_A_match {
 				);
 			if ( ($packed & $mask) eq ($self->{clientip6} & $mask) ) {
 				# match!
+				DEBUG( "match mech a:...//$plen for mech $mech with qual $qual" );
 				return ($qual,"matches domain: $domain//$plen with IP6 $addr",
 					{ mechanism => $mech })
 			}
@@ -1294,11 +1341,13 @@ sub _check_A_match {
 	# no match yet, can we resolve another name?
 	if ( @$names ) {
 		my $typ = $self->{clientip4} ? 'A':'AAAA';
+		DEBUG( "check mech a:$names->[0]/$plen for mech $mech with qual $qual" );
 		$self->{cb} = [ \&_got_A, $qual,$plen,$names,$mech ];
 		return scalar(Net::DNS::Packet->new( $names->[0], $typ,'IN' ));
 	}
 
 	# finally no match
+	DEBUG( "no match mech $mech:$domain/$plen" );
 	return;
 }
 
@@ -1313,9 +1362,9 @@ sub _mech_mx {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qual,$domain,$plen) = @_;
 	$domain = $domain->{expanded} if ref $domain;
-	DEBUG( "mech mx:$domain/$plen with qual=$qual" );
 	if ( my @err = _check_domain($domain,
 		"mx:$domain".( defined $plen ? "/$plen":"" ))) {
+		DEBUG( "no mech mx:$domain/$plen - @err" );
 		return @err
 	}
 
@@ -1332,13 +1381,16 @@ sub _got_MX {
 	my ($qtype,$rcode,$ans,$add,$qual,$domain,$plen) = @_;
 
 	if ( $rcode eq 'NXDOMAIN' ) {
+		DEBUG( "no match mech mx:$domain/$plen - $rcode" );
 		# no records found
 	} elsif ( $rcode ne 'NOERROR' ) {
+		DEBUG( "no match mech mx:$domain/$plen - $rcode" );
 		return ( SPF_TempError,
 			"getting MX form $domain",
 			{ problem => "error resolving $domain" }
 		);
 	} elsif ( ! @$ans ) {
+		DEBUG( "no match mech mx:$domain/$plen - no MX records" );
 		return; # domain has no MX -> no match
 	}
 
@@ -1347,25 +1399,25 @@ sub _got_MX {
 		sort { $a->[1] <=> $b->[1] }
 		map { [ $_->exchange, $_->preference ] }
 		@$ans;
-	my %mx = map { $_ => 0 } @mx;
+	my %mx = map { $_ => [] } @mx;
 
 	# try to find A|AAAA records in additional data
-	my (@addr,@found);
 	my $atyp = $self->{clientip4} ? 'A':'AAAA';
 	for my $rr (@$add) {
 		if ( $rr->type eq $atyp && exists $mx{$rr->name} ) {
-			push @addr, $rr->address;
-			$mx{$rr->name} = 1;
+			push @{$mx{$rr->name}},$rr->address;
 		}
 	}
-	DEBUG( "found mx for $domain: @mx" );
+	DEBUG( "found mx for $domain: ".join( " ",
+		map { $mx{$_} ? "$_(".join(",",@{$mx{$_}}).")" : $_ } @mx ));
 
 	# remove from @mx where I've found addresses
+	@mx = grep { ! @{$mx{$_}} } @mx;
 	# limit the Rest to 10 records (rfc4408,10.1)
-	@mx = grep { ! $mx{$_} } @mx;
 	splice(@mx,10) if @mx>10;
 
-	return _check_A_match( $self,$qual,$domain,$plen,\@addr,\@mx,'mx');
+	my @addr = map { @$_ } values %mx;
+	return _check_A_match( $self,$qual,"(mx)".$domain,$plen,\@addr,\@mx,'mx');
 }
 
 ############################################################################
@@ -1377,8 +1429,8 @@ sub _mech_exists {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
-	DEBUG( "mech exists:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "exists:$domain" )) {
+		DEBUG( "no match mech exists:$domain - @err" );
 		return @err
 	}
 
@@ -1394,8 +1446,14 @@ sub _got_A_exists {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qtype,$rcode,$ans,$add,$qual,$domain) = @_;
 
-	return if $rcode ne 'NOERROR'; # no match
-	return if ! @$ans; # no A records
+	if ( $rcode ne 'NOERROR' ) {
+		DEBUG( "no match mech exists:$domain - $rcode" );
+		return;
+	} elsif ( ! @$ans ) {
+		DEBUG( "no match mech exists:$domain - no A records" );
+		return;
+	}
+	DEBUG( "match mech exists:$domain with qual $qual" );
 	return ($qual,"domain $domain exists", { mechanism => 'exists' } )
 }
 
@@ -1414,8 +1472,8 @@ sub _mech_ptr {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
-	DEBUG( "mech ptr:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "ptr:$domain" )) {
+		DEBUG( "no match mech ptr:$domain - @err" );
 		return @err
 	}
 
@@ -1428,8 +1486,10 @@ sub _mech_ptr {
 		# already checked
 		if ( ! $self->{validated}{$ip}{$domain} ) {
 			# could not be validated
+			DEBUG( "no match mech ptr:$domain - cannot validate $ip/$domain" );
 			return; # ignore
 		} else {
+			DEBUG( "match mech ptr:$domain with qual $qual" );
 			return ($qual,"$domain validated" );
 		}
 	}
@@ -1454,12 +1514,22 @@ sub _got_PTR {
 	my ($qtype,$rcode,$ans,$add,$qual,$query,$domain) = @_;
 
 	# ignore mech if it can not be validated
-	return if $rcode ne 'NOERROR';
-	my @names = map { $_->ptrdname } @$ans or return;
+	$rcode eq 'NOERROR' or do {
+		DEBUG( "no match mech ptr:$domain - $rcode" );
+		return;
+	};
+	my @names = map { $_->ptrdname } @$ans or do {
+		DEBUG( "no match mech ptr:$domain - no names in PTR lookup" );
+		return;
+	};
 
 	# strip records, which do not end in $domain
 	@names = grep { $_ eq $domain || m{\.\Q$domain\E$} } @names;
-	return if ! @names; # return if no matches inside $domain
+	if ( ! @names ) {
+		DEBUG( "no match mech ptr:$domain - no names in PTR lookup match $domain" );
+		# return if no matches inside $domain
+		return;
+	}
 
 	# limit to no more then 10 names (see RFC4408, 10.1)
 	splice(@names,10) if @names>10;
@@ -1502,13 +1572,19 @@ sub _got_A_ptr {
 		$self->{validated}{$ip}{$names->[0]} = $match;
 
 		# return $qual if we have verified the ptr
-		return ( $qual,"verified clientip with ptr", { mechanism => 'ptr' })
-			if $match;
+		if ($match) {
+			DEBUG( "match mech ptr:... with qual $qual" );
+			return ( $qual,"verified clientip with ptr", { mechanism => 'ptr' })
+		}
 	}
 
 	# try next
 	shift @$names;
-	@$names or return; # no next
+	@$names or do {
+		# no next
+		DEBUG( "no match mech ptr:... - no more names for clientip" );
+		return;
+	};
 
 	# cb stays the same
 	return scalar(Net::DNS::Packet->new( $names->[0], $qtype,'IN' ));
@@ -1524,10 +1600,12 @@ sub _mech_include {
 	my Mail::SPF::Iterator $self = shift;
 	my ($qual,$domain) = @_;
 	$domain = $domain->{expanded} if ref $domain;
-	DEBUG( "mech include:$domain with qual=$qual" );
 	if ( my @err = _check_domain($domain, "include:$domain" )) {
+		DEBUG( "failed mech include:$domain - @err" );
 		return @err
 	}
+
+	DEBUG( "mech include:$domain with qual=$qual" );
 
 	return ( SPF_PermError, "",
 		{ problem => "Number of DNS mechanism exceeded" })

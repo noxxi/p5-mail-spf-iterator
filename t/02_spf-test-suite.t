@@ -35,7 +35,7 @@ use Data::Dumper;
 
 $|=1;
 my $DEBUG=1;
-$Mail::SPF::Iterator::DEBUG = $DEBUG;
+Mail::SPF::Iterator->import( Debug => $DEBUG );
 
 for my $use_additionals ('with additionals','') {
 	for my $test ( @Tests ) {

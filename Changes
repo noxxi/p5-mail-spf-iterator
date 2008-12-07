@@ -1,3 +1,8 @@
+1.02 2008-12-07
+- more useful debugging messages
+- switch on debugging via use/import
+- can set own debug function via use/import
+
 1.02 2008-11-26
 - document all fields in module
 - report identity=helo in Received-SPF if helo, not mailfrom, is used
