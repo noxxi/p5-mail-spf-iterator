@@ -195,7 +195,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.03';
+our $VERSION = '1.04';
 
 use fields (
 	# values given in or derived from params to new()
@@ -474,7 +474,7 @@ sub mailheader {
 	my ($result,$info,$hash) = @{ $self->{result} || return };
 	my $t = "$result ";
 	my %t = (
-		%$hash,
+		%{ $hash || {} },
 		'client-ip' => (
 			$self->{clientip4}
 				? inet_ntoa($self->{clientip4})

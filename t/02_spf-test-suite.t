@@ -99,6 +99,9 @@ for my $use_additionals ('with additionals','') {
 						last if $status or @ans;
 					}
 				}
+
+				my $mh = $spf->mailheader;
+				$mh =~m{^$status }i or die "bad mail header for status $status: $mh";
 				die bless [ lc($status),@ans ],'SPFResult';
 			};
 
