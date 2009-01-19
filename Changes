@@ -1,3 +1,6 @@
+1.05 2009-01-19
+- work around changes between Net::DNS 0.63 and 0.64
+
 1.04 2009-01-19
 - fix bug in mailheader for empty or invalid SPF records
 

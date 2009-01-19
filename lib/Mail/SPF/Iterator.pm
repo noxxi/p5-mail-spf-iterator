@@ -195,7 +195,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.04';
+our $VERSION = '1.05';
 
 use fields (
 	# values given in or derived from params to new()
@@ -623,17 +623,20 @@ sub next {
 	my (%cname,%ans);
 	for my $rr ($dnsresp->answer) {
 		my $rtype = $rr->type;
+		# changed between Net::DNS 0.63 and 0.64 
+		# it reports now the presentation name instead of the raw name
+		( my $name = $rr->name ) =~s{\\(?:(\d\d\d)|(.))}{ $2 || chr($1) }esg;
 		if ( $rtype eq 'CNAME' ) {
 			# remember CNAME so that we can check that the answer record
 			# for $qtype matches name from query or CNAME which is an alias
 			# for name
-			if ( exists $cname{$rr->name} ) {
+			if ( exists $cname{$name} ) {
 				DEBUG( "more than one CNAME for same name" );
 				next; # XXX should we TempError instead of ignoring?
 			}
-			$cname{$rr->name} = $rr->cname;
+			$cname{$name} = $rr->cname;
 		} elsif ( $rtype eq $qtype ) {
-			push @{ $ans{$rr->name}},$rr;
+			push @{ $ans{$name}},$rr;
 		} else {
 			# XXXX should we TempError instead of ignoring?
 			DEBUG( "unexpected answer record for $qtype:$qname" );
@@ -663,7 +666,7 @@ sub next {
 		# answer records which don't match name from query or via CNAME
 		# derived names
 		# Report but ignore - XXX should we TempError instead?
-		DEBUG( "unrelated answer records for $qtype".Dumper(\%ans));
+		DEBUG( "unrelated answer records for $qtype names=@names ".Dumper(\%ans));
 	}
 
 	if ( ! @ans and @names>1 ) {

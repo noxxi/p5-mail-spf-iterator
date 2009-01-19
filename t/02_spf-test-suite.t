@@ -261,6 +261,17 @@ sub send {
 			}
 
 			#DEBUG( Dumper( \%rr ));
+			# work around a Bug in Net::DNS 0.64, where it will interpret
+			# cafe:babe::1 as cafe:babe:0:1:0:0:0:0 when given in hash 
+			# to Net::DNS::RR->new
+			if ( $rr{type} eq 'AAAA' ) {
+				# replace with long form
+				my @a = split( ':',$rr{address});
+				if ( my $fill = 8 - @a ) {
+					@a = map { $_ eq '' ? (0) x ($fill+1) : $_ } @a;
+					$rr{address} = join(':',@a);
+				}
+			}
 			$ans = Net::DNS::RR->new( %rr ) or die;
 			DEBUG( "answer: ".$ans->string );
 
