@@ -1,3 +1,6 @@
+1.05_01 2009-02-02
+- add test when ptr record results in cname which then results in
+  another ptr record
 1.05 2009-01-19
 - work around changes between Net::DNS 0.63 and 0.64
 
