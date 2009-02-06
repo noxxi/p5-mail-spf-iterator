@@ -1,3 +1,7 @@
+1.06 2009-02-06
+- fix for DNS names with spaces and Net::DNS <0.64 (for SPF test 
+  suite, should be irrelevant for real life DNS names)
+
 1.05_01 2009-02-02
 - add test when ptr record results in cname which then results in
   another ptr record

@@ -195,7 +195,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.05';
+our $VERSION = '1.06';
 
 use fields (
 	# values given in or derived from params to new()
@@ -620,6 +620,7 @@ sub next {
 	# verify if names and types in answer records match query
 	# handle CNAMEs
 	my $qname = $question->qname;
+	$qname =~s{\\(?:(\d\d\d)|(.))}{ $2 || chr($1) }esg; # presentation -> raw
 	my (%cname,%ans);
 	for my $rr ($dnsresp->answer) {
 		my $rtype = $rr->type;
