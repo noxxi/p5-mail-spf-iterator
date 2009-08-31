@@ -195,7 +195,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.06';
+our $VERSION = '1.07';
 
 use fields (
 	# values given in or derived from params to new()
@@ -725,7 +725,7 @@ sub _next_process_cbrv {
 		return;
 	}
 
-	# If inside include response is only pre-final
+	# inside include the response is only pre-final,
 	# propagate it the include stack up:
 	# see RFC4408, 5.2 for propagation of results
 	while ( my $top = pop @{ $self->{include_stack} } ) {
@@ -748,6 +748,10 @@ sub _next_process_cbrv {
 				# ! Pass == non-match
 				# -> restart with @rv=() and go on with next mech
 				@rv = $self->_next_mech;
+				if ( UNIVERSAL::isa( $rv[0],'Net::DNS::Packet' )) {
+					# @rv is list of DNS packets
+					return $self->_next_rv_dnsq(@rv)
+				}
 			}
 		}
 	}

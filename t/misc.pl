@@ -17,6 +17,14 @@
         'host' => '1.2.3.5',
         'helo' => 'mail.example.net'
       },
+      'second-include' => {
+        'spec' => '',
+        'mailfrom' => 'user@example7.net',
+        'description' => 'second include matches',
+        'result' => 'pass',
+        'host' => '3.4.5.6',
+        'helo' => 'mail.example.net'
+      },
       'domain-dots-at-end' => {
         'spec' => '4.3/1',
         'mailfrom' => 'user@example5.net....',
@@ -70,11 +78,6 @@
     },
     'description' => 'various other tests',
     'zonedata' => {
-      'five.three.two.one.explain.example1.net' => [
-        {
-          'TXT' => 'forbidden for %{p}'
-        }
-      ],
       'example5.net' => [
         {
           'SPF' => 'spf2.0/mfrom -ip4:1.2.3.5 all'
@@ -88,17 +91,9 @@
           'CNAME' => 'example.com'
         }
       ],
-      'example3.net' => [
+      'example8.net' => [
         {
-          'SPF' => 'spf2.0/pra -ip4:1.2.3.5 all'
-        },
-        {
-          'SPF' => 'spf2.0/mfrom ip4:1.2.3.5 -all'
-        }
-      ],
-      'friend.example6.net' => [
-        {
-          'A' => '2.3.4.5'
+          'SPF' => 'v=spf1 ip4:2.3.4.5 ip4:3.4.5.6 -all'
         }
       ],
       'example2.net' => [
@@ -106,24 +101,9 @@
           'SPF' => 'spf2.0/pra,mfrom ip4:1.2.3.5 -all'
         }
       ],
-      '5.3.2.1.in-addr.arpa' => [
-        {
-          'PTR' => 'one.two.three.five.example.net'
-        }
-      ],
       'example1.net' => [
         {
           'SPF' => 'v=spf1 -ip4:1.2.3.5 all exp=%{p4r}.explain.example1.net'
-        }
-      ],
-      'example6.net' => [
-        {
-          'SPF' => 'v=spf1 ptr:friend.example6.net -all'
-        }
-      ],
-      'two.three.four.five.example.net' => [
-        {
-          'PTR' => 'friend.example6.net'
         }
       ],
       'example4.net' => [
@@ -139,11 +119,6 @@
           'SPF' => 'v=spf1 ip4:1.2.3.5 -all'
         }
       ],
-      '5.4.3.2.in-addr.arpa' => [
-        {
-          'CNAME' => 'two.three.four.five.example.net'
-        }
-      ],
       'one.two.three.five.example.net' => [
         {
           'A' => '1.2.3.5'
@@ -152,6 +127,49 @@
       'unknown.explain.example1.net' => [
         {
           'TXT' => 'bad message for %{p}'
+        }
+      ],
+      'five.three.two.one.explain.example1.net' => [
+        {
+          'TXT' => 'forbidden for %{p}'
+        }
+      ],
+      'example3.net' => [
+        {
+          'SPF' => 'spf2.0/pra -ip4:1.2.3.5 all'
+        },
+        {
+          'SPF' => 'spf2.0/mfrom ip4:1.2.3.5 -all'
+        }
+      ],
+      '5.3.2.1.in-addr.arpa' => [
+        {
+          'PTR' => 'one.two.three.five.example.net'
+        }
+      ],
+      'friend.example6.net' => [
+        {
+          'A' => '2.3.4.5'
+        }
+      ],
+      'example6.net' => [
+        {
+          'SPF' => 'v=spf1 ptr:friend.example6.net -all'
+        }
+      ],
+      'two.three.four.five.example.net' => [
+        {
+          'PTR' => 'friend.example6.net'
+        }
+      ],
+      '5.4.3.2.in-addr.arpa' => [
+        {
+          'CNAME' => 'two.three.four.five.example.net'
+        }
+      ],
+      'example7.net' => [
+        {
+          'SPF' => 'v=spf1 include:example.com include:example8.net -all'
         }
       ]
     }

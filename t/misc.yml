@@ -68,6 +68,14 @@ tests:
     host: 2.3.4.5
     mailfrom: user@example6.net
     result: pass
+  second-include:
+    description: >-
+      second include matches
+    spec: ""
+    helo: mail.example.net
+    host: 3.4.5.6
+    mailfrom: user@example7.net
+    result: pass
 zonedata:
   example.net:
     - CNAME: example.com
@@ -102,3 +110,7 @@ zonedata:
     - PTR: friend.example6.net
   friend.example6.net:
     - A: 2.3.4.5
+  example7.net:
+    - SPF: v=spf1 include:example.com include:example8.net -all
+  example8.net: 
+    - SPF: v=spf1 ip4:2.3.4.5 ip4:3.4.5.6 -all
