@@ -195,7 +195,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.07';
+our $VERSION = '1.08';
 
 use fields (
 	# values given in or derived from params to new()
@@ -486,6 +486,9 @@ sub mailheader {
 	for ( values(%t)) {
 		# Quote: this is not exactly rfc2822 but should be enough
 		s{([\"\\])}{\\$1}g;
+		s{[\r\n]+}{ }g;
+		s{^\s+}{}; 
+		s{\s+$}{};
 		$_ = qq("$_") if m{[\s;()]} or $_ eq '';
 	}
 	$t{'envelope-from'} = "<$self->{sender}>" if $self->{sender};

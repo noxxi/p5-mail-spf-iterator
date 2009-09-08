@@ -1,3 +1,7 @@
+1.08 2009-09-08
+- fixed case where problem part in SPF-Received Header contained
+  newlines
+
 1.07 2009-08-31
 - fix for SPF with multiple includes on same level where not the 
   first matches
