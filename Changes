@@ -1,3 +1,8 @@
+1.09 2011-08-29
+- let next() report ('') if given packet matched query, but got
+  ignored or () if packet did not match any query, instead of 
+  reporting () in both cases
+
 1.08 2009-09-08
 - fixed case where problem part in SPF-Received Header contained
   newlines

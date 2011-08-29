@@ -109,6 +109,12 @@ C<< ( RESULT, COMMENT, HASH, EXPLAIN ) >>. RESULT is the result, e.g. "Fail",
 information about problem, mechanism for the Received-SPF header.
 EXPLAIN will be set to the explain string if RESULT is Fail.
 
+If no final result was achieved yet it will either return 
+C<< (undef,@QUERIES) >> with a list of new queries to continue, C<< ('') >>
+in case the ANSWER produced an error but got ignored, because there are
+other queries open, or C<< () >> in case the ANSWER was ignored because it
+did not match any open queries.
+
 =item mailheader
 
 Creates value for Received-SPF header based on the final answer from next().
@@ -195,7 +201,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.08';
+our $VERSION = '1.09';
 
 use fields (
 	# values given in or derived from params to new()
@@ -508,7 +514,8 @@ sub mailheader {
 # Returns: (undef,@dnsq) | ($status,$info,\%param,$explain) | ()
 #   (undef,@dnsq): @dnsq are more DNS questions
 #   ($status,$info,\%param,$explain): final response
-#   (): reply ignored, waiting for next reply
+#   (''): reply processed, but answer ignored (likely error)
+#   (): reply ignored, does not matching outstanding request
 ############################################################################
 sub next {
 	my Mail::SPF::Iterator $self = shift;
@@ -566,14 +573,9 @@ sub next {
 	}
 
 	if ( ! $found ) {
-		# unexpected response, type or domain do not match query -> TempError
-		my %want = map { $_->{q}->qtype => 1 } @$cb_queries;
-		my %name = map { $_->{q}->qname => 1 } @$cb_queries;
+		# packet does not match our queries
 		DEBUG( "found no open query for ".$question->string );
-		return ( SPF_TempError,
-			"getting ".join("|",keys %want)." for ".join("|",keys %name),
-			{ problem => "unexpected DNS response" },
-		);
+		return; # ignore problem
 	} elsif ( ++$found->{done} > 1 ) {
 		# duplicate response - ignore
 		DEBUG( "duplicate response, ignoring" );
@@ -585,9 +587,10 @@ sub next {
 	if ( $err ) {
 		if ( grep { ! $_->{done} } @$cb_queries ) {
 			# we still have outstanding queries, so we might still get answers
-			# -> return () as a sign, that we ignore this error
+			# -> return ('') as a sign, that we got an error to an outstanding
+			# trequest, but otherwise ignore this error
 			DEBUG( "ignore error '$err', we still have oustanding queries" );
-			return;
+			return ('');
 
 		} elsif ( my $r = $self->{result} ) {
 			# we have a final result already, so this error occured only while
