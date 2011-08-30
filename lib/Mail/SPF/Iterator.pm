@@ -201,7 +201,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.09';
+our $VERSION = '1.10';
 
 use fields (
 	# values given in or derived from params to new()
@@ -728,7 +728,7 @@ sub _next_process_cbrv {
 	if ( $rv[0] eq SPF_Noop ) {
 		die "NOOP but no open queries"
 			if ! grep { ! $_->{done} } @{$self->{cbq}};
-		return;
+		return ('');
 	}
 
 	# inside include the response is only pre-final,

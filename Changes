@@ -1,3 +1,5 @@
+1.10 2011-08-30
+- return ('') also if TXT was NXDOMAIN but SPF query is still open etc
 1.09 2011-08-29
 - let next() report ('') if given packet matched query, but got
   ignored or () if packet did not match any query, instead of 
