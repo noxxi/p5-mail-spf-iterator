@@ -1,3 +1,7 @@
+1.11 2012-06-02
+- adapt to changed behavior in newer Net::DNS versions regarding
+  encoding of special characters like spaces. Nothing changed for
+  normal DNS names, only for the sometimes esoteric rfc4408 test suite
 1.10 2011-08-30
 - return ('') also if TXT was NXDOMAIN but SPF query is still open etc
 1.09 2011-08-29

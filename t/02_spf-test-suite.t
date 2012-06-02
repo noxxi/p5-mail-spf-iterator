@@ -203,7 +203,9 @@ sub send {
 
 	my (%ans,$timeout,@answer,@cname);
 	while (1) {
-		( my $key = $qname) =~s{\.$}{};
+		( my $key = $qname ) =~ s{\.$}{};
+		# newer Net::DNS versions encode space as \\032, older do not :(
+		$key =~s{\\(?:(\d\d\d)|(.))}{$2||chr($1)}esg; 
 		my @match = grep { lc($key) eq lc($_) } keys %{ $self->{records}}
 			or last;
 

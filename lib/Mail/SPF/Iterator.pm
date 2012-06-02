@@ -201,7 +201,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.10';
+our $VERSION = '1.11';
 
 use fields (
 	# values given in or derived from params to new()
@@ -556,17 +556,20 @@ sub next {
 	my $found;
 	for (@$cb_queries) {
 		next if $qid != $_->{id}; # ID mismatch
+		next if $qtype ne $_->{q}->qtype;  # type mismatch
 
-		# presentation2wire
-		# $_->{q}->qname has still the raw (wire) value, because it was set to
-		# it but the qname of the response has the human readable presentation
-		# from the zonefiles :(
-		# fortunatly this applies only to DNS names with special chars
-		# see Net::DNS::wire2presentation
-		( my $qname = lc($question->qname) )
-			=~s{\\(?:(\d\d\d)|(.))}{ $2 || chr($1) }esg;
+		if ( lc($question->qname) eq lc($_->{q}->qname) ) {
+			$found = $_;
+			last;
+		}
 
-		if ( $qtype eq $_->{q}->qtype and $qname eq lc($_->{q}->qname)) {
+		# in case of special characters the names might have the 
+		# wire presentation \DDD or the raw presentation
+		# actual behavior depends on the Net::DNS version, so normalize
+		my $rname = lc($question->qname);
+		my $qname = lc($_->{q}->qname);
+		s{\\(?:(\d\d\d)|(.))}{ $2 || chr($1) }esg for($rname,$qname);
+		if ( $rname eq $qname ) {
 			$found = $_;
 			last;
 		}
