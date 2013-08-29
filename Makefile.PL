@@ -7,5 +7,10 @@ WriteMakefile(
 		'Net::DNS' => 0.62,
 		'URI' => 0,
 	},
+	META_MERGE => {
+		resources => {
+			repository => 'https://github.com/noxxi/p5-mail-spf-iterator',
+		},
+	},
 );
 
