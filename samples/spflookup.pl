@@ -7,8 +7,8 @@ use Getopt::Long qw(:config posix_default bundling);
 
 #### Options
 GetOptions(
-	'd|debug' => sub { Mail::SPF::Iterator->import( Debug => 1 ) },
-	'h|help' => sub { usage() }
+    'd|debug' => sub { Mail::SPF::Iterator->import( Debug => 1 ) },
+    'h|help' => sub { usage() }
 ) or usage();
 
 my ($ip,$sender,$helo,$local) = @ARGV;
@@ -32,6 +32,6 @@ sub usage { die <<USAGE; }
 USAGE
 
 sub DEBUG {
-	print STDERR "DEBUG: @_\n";
+    print STDERR "DEBUG: @_\n";
 }
 

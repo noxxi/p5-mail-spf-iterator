@@ -1,9 +1,15 @@
+1.111 2015-11-15
+- adapt tests to recent changes in Net::DNS (use of undocumented function
+  stopped working). RT#108914. Thanks to SREZIC
+
 1.11 2012-06-02
 - adapt to changed behavior in newer Net::DNS versions regarding
   encoding of special characters like spaces. Nothing changed for
   normal DNS names, only for the sometimes esoteric rfc4408 test suite
+
 1.10 2011-08-30
 - return ('') also if TXT was NXDOMAIN but SPF query is still open etc
+
 1.09 2011-08-29
 - let next() report ('') if given packet matched query, but got
   ignored or () if packet did not match any query, instead of 
