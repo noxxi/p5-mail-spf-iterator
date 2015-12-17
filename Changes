@@ -1,3 +1,10 @@
+1.112 2015-12-16
+- optimize debugging and make it usable from outsite (for
+  Mail::DMARC::Iterator).
+- method todo() to get a list of open DNS queries
+- hash in result contains all the information which are also contained in
+  the Received-SPF header, i.e. also client-ip, envelope-from...
+
 1.111 2015-11-15
 - adapt tests to recent changes in Net::DNS (use of undocumented function
   stopped working). RT#108914. Thanks to SREZIC
