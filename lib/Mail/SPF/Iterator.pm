@@ -201,7 +201,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.112';
+our $VERSION = '1.113';
 
 use fields (
     # values given in or derived from params to new()
@@ -489,7 +489,7 @@ sub mailheader {
 	$v =~ s{[\r\n]+}{ }g;
 	$v =~ s{^\s+}{};
 	$v =~ s{\s+$}{};
-	$v = qq("$_") if $v =~ m{[\s;()]} or $v eq '';
+	$v = qq("$v") if $v =~ m{[\s;()]} or $v eq '';
 	"$_=$v" 
     } sort keys %$hash );
 }
