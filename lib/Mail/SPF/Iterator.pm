@@ -657,7 +657,8 @@ sub next {
     # if there are unconnected CNAMEs they will be left in %cname
     my @names = ($qname);
     while ( %cname ) {
-	push @names, delete @cname{@names} or last;
+	push @names, grep { defined $_ } delete @cname{@names}
+	    or last;
     }
     if ( %cname ) {
 	# Report but ignore - XXX should we TempError instead?
