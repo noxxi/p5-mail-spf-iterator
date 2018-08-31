@@ -2,150 +2,154 @@
 use strict;
 use warnings;
 
-my @Tests;
+$|=1;
+my $DEBUG=1;
 my $can_ip6;
-BEGIN {
-    my @tfile = @ARGV;
-    @tfile = ( 'rfc4408-tests.pl','misc.pl' ) if !@tfile;
-    for my $tfile (@tfile) {
-	my $tests;
-	for ( $tfile,"t/$tfile" ) {
-	    -f or next;
-	    $tests = do $_;
-	    die $@ if $@;
-	    last;
-	}
-	if ( ! $tests or !@$tests ) {
-	    print "1..1\nok # skip Perl file for test suite not found\n";
-	    exit;
-	}
-	push @Tests,@$tests;
-    }
-    my $sum = 0;
-    $sum += 2*keys(%{ $_->{tests} }) for (@Tests);
-    print "1..$sum\n";
-
-    $can_ip6 = eval 'use Socket6;1';
-}
+BEGIN { $can_ip6 = eval 'use Socket6;1'; }
 
 use Mail::SPF::Iterator;
 use Net::DNS;
 use Data::Dumper;
 
+sub run {
+    my ($tfile,%testopt) = @_;
+    my $tests;
+    for ( $tfile,"t/$tfile" ) {
+	-f or next;
+	$tests = do $_;
+	die $@ if $@;
+	last;
+    }
+    if ( ! $tests or !@$tests ) {
+	print "1..1\nok # skip Perl file for test suite not found\n";
+	exit;
+    }
 
-$|=1;
-my $DEBUG=1;
-Mail::SPF::Iterator->import( Debug => $DEBUG );
+    my @Tests = @$tests;
+    my $sum = 0;
+    $sum += 2*keys(%{ $_->{tests} }) for (@Tests);
+    print "1..$sum\n";
 
-for my $use_additionals ('with additionals','') {
-    for my $test ( @Tests ) {
-	my $desc= $test->{description};
-	my $dns_setup = $test->{zonedata};
-	my $subtests = $test->{tests};
+    Mail::SPF::Iterator->import( Debug => $DEBUG );
 
-	my $resolver = myResolver->new(
-	    records => $dns_setup,
-	    use_additionals => $use_additionals
-	);
-	for my $tname (sort keys %$subtests) {
-	    my $tdata = $subtests->{$tname};
+    for my $use_additionals ('with additionals','') {
+	for my $test ( @Tests ) {
+	    my $desc= $test->{description};
+	    my $dns_setup = $test->{zonedata};
+	    my $subtests = $test->{tests};
 
-	    my %d = %$tdata;
-	    delete @d{qw/description comment/};
-	    my $explanation = delete $d{explanation};
+	    my $resolver = myResolver->new(
+		records => $dns_setup,
+		use_additionals => $use_additionals
+	    );
+	    for my $tname (sort keys %$subtests) {
+		my $tdata = $subtests->{$tname};
 
-	    my $result = delete $d{result};
-	    $result = [ $result ] if ! ref $result;
-	    $_=lc for(@$result);
+		my %d = %$tdata;
+		delete @d{qw/description/};
+		my $whatever = (delete $d{comment} ||'') =~m{
+		    matter\s+of\s+opinion        |
+		    effectively\s+random
+		}x;
+		my $explanation = delete $d{explanation};
 
-	    my $spec = delete $d{spec};
-	    $spec = [ $spec ] if ! ref($spec);
-	    my $comment = "$desc | $tname (@$spec) (@$result) $use_additionals";
+		my $result = delete $d{result};
+		$result = [ $result ] if ! ref $result;
+		$_=lc for(@$result);
 
-	    if ( ! $can_ip6 and ( $d{host} =~m{::} or $tname =~m{ip6} )) {
-		print "ok # skip Socket6.pm not installed\n";
-		next;
-	    }
+		my $spec = delete $d{spec};
+		$spec = [ $spec ] if ! ref($spec);
+		my $comment = "$desc | $tname (@$spec) (@$result) $use_additionals";
 
-	    # capture debug output of failed cases
-	    my $debug = '';
-	    eval {
-		open( my $dbg, '>',\$debug );
-		local *STDERR = $dbg;
-
-		my $spf = eval {
-		    Mail::SPF::Iterator->new(
-			delete $d{host},
-			delete $d{mailfrom},
-			delete $d{helo},
-		    );
-		};
-		die "no spf: $@\n".Dumper($tdata) if ! $spf;
-		die "unhandled args :".Dumper(\%d) if %d;
-
-		$explanation = $spf->explain_default
-		    if $explanation and $explanation eq 'DEFAULT';
-
-		my ($status,@ans) = $spf->next;
-		while ( ! $status ) {
-		    my @query = @ans;
-		    die "no queries" if ! @query;
-		    for my $q (@query) {
-			#DEBUG( "next query >>> ".($q->question)[0]->string );
-			my $answer = $resolver->send( $q );
-			($status,@ans) = $spf->next(
-			    $answer || [ $q, $resolver->errorstring ]);
-			DEBUG( "status=$status" ) if $status;
-			last if $status or @ans;
-		    }
-		}
-
-		my $mh = $spf->mailheader;
-		$mh =~m{^$status }i or die "bad mail header for status $status: $mh";
-		die bless [ lc($status),@ans ],'SPFResult';
-	    };
-
-	    if ( ref($@) ne 'SPFResult' ) {
-		print "not ok # $comment - error\n";
-		( my $t = $@."\n".$debug ) =~s{^}{| }mg;
-		print Dumper($tdata),$t;
-		next;
-	    }
-
-	    my ($status,$info,$hash,$explain) = @{$@};
-	    if ( ! grep { $status eq $_ } @$result ) {
-		print "not ok # $comment - got $status\n";
-		$debug =~s{^}{| }mg;
-		print Dumper($tdata),$debug.Dumper(
-		    { info => $info, hash => $hash, explain => $explain });
-		next;
-	    }
-
-	    if ( $explanation ) {
-		if ( $explain ne $explanation ) {
-		    print "not ok # $comment - ".
-			"exp should be '$explanation' was '$explain'\n";
-		    $debug =~s{^}{| }mg;
-		    print Dumper($tdata),$debug;
+		if ( ! $can_ip6 and ( $d{host} =~m{::} or $tname =~m{ip6} )) {
+		    print "ok # skip Socket6.pm not installed\n";
 		    next;
 		}
-	    }
 
-	    if ( $status ne $result->[0] ) {
-		if ( $tname =~m{^(mx|ptr)-limit$} ) {
-		    #### spec: "... The SPF result is effectively randomized."
-		    print "ok # $comment - got $status\n";
-		} else {
+		# capture debug output of failed cases
+		my $debug = '';
+		eval {
+		    open( my $dbg, '>',\$debug );
+		    local *STDERR = $dbg;
+
+		    my $spf = eval {
+			Mail::SPF::Iterator->new(
+			    delete $d{host},
+			    delete $d{mailfrom},
+			    delete $d{helo},
+			    undef,
+			    \%testopt
+			);
+		    };
+		    die "no spf: $@\n".Dumper($tdata) if ! $spf;
+		    die "unhandled args :".Dumper(\%d) if %d;
+
+		    $explanation = $spf->explain_default
+			if $explanation and $explanation eq 'DEFAULT';
+
+		    my ($status,@ans) = $spf->next;
+		    my $dns_count = 0;
+		    while ( ! $status ) {
+			my @query = @ans;
+			die "no queries" if ! @query;
+			for my $q (@query) {
+			    $dns_count++;
+			    DEBUG( "next query ($dns_count) >>> ".($q->question)[0]->string );
+			    my $answer = $resolver->send( $q );
+			    ($status,@ans) = $spf->next(
+				$answer || [ $q, $resolver->errorstring ]);
+			    DEBUG( "status=$status" ) if $status;
+			    last if $status or @ans;
+			}
+		    }
+		    DEBUG("done after $dns_count queries");
+
+		    my $mh = $spf->mailheader || '';
+		    $mh =~m{^$status }i or die "bad mail header for status $status: $mh";
+		    die bless [ lc($status),@ans ],'SPFResult';
+		};
+
+		if ( ref($@) ne 'SPFResult' ) {
+		    print "not ok # $comment - error\n";
+		    ( my $t = $@."\n".$debug ) =~s{^}{| }mg;
+		    print Dumper($tdata),$t;
+		    next;
+		}
+
+		my ($status,$info,$hash,$explain) = @{$@};
+		if ( ! grep { $status eq $_ } @$result ) {
 		    print "not ok # $comment - got $status\n";
 		    $debug =~s{^}{| }mg;
 		    print Dumper($tdata),$debug.Dumper(
 			{ info => $info, hash => $hash, explain => $explain });
+		    next;
 		}
-		next;
+
+		if ( $explanation ) {
+		    if ( $explain ne $explanation ) {
+			print "not ok # $comment - ".
+			    "exp should be '$explanation' was '$explain'\n";
+			$debug =~s{^}{| }mg;
+			print Dumper($tdata),$debug;
+			next;
+		    }
+		}
+
+		if ( $status ne $result->[0] ) {
+		    if ($whatever) {
+			print "ok # $comment - got $status\n";
+		    } else {
+			print "not ok # $comment - got $status\n";
+			$debug =~s{^}{| }mg;
+			print Dumper($tdata),$debug.Dumper(
+			    { info => $info, hash => $hash, explain => $explain });
+		    }
+		    next;
+		}
+
+
+		print "ok # $comment\n";
 	    }
-
-
-	    print "ok # $comment\n";
 	}
     }
 }
