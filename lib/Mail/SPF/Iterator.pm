@@ -212,7 +212,7 @@ use warnings;
 
 package Mail::SPF::Iterator;
 
-our $VERSION = '1.115';
+our $VERSION = '1.116';
 
 use fields (
     # values given in or derived from params to new()
