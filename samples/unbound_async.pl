@@ -1,4 +1,5 @@
 #!/usr/bin/perl
+# Copyright Felipe Gasper 2021
 
 use strict;
 use warnings;
