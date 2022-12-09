@@ -986,6 +986,7 @@ sub _next_rv_dnsq {
     my @dnsq = @_;
     # track queries for later verification
     $self->{cbq} = [ map {
+	$_->header->rd(1); # make query recursive
 	{ q => ($_->question)[0], id => $_->header->id, pkt => $_ }
     } @dnsq ];
     $DEBUG && DEBUG( "need to lookup ".join( " | ",
